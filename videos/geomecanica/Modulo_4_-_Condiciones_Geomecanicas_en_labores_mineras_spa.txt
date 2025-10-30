@@ -1,0 +1,45 @@
+Módulo 4: Condiciones Geomecánicas en labores mineras
+
+Bienvenido al módulo cuatro. Aquí aprenderás a identificar las condiciones y calidad de rocas en labores mineras. 
+
+(Taller VR de identificación de calidad de rocas estable e inestable)
+
+Formación de cuñas y procedencia en labores. Son cuñas tetrahedrales liberadas por las intersecciones de diaclasas en rocas fracturadas, las cuales pueden caer o deslizarse debido a las cargas gravitacionales. 
+
+Condiciones de riesgo. Conozcamos algunas de las condiciones de riesgo más frecuentes y relevantes en las labores de minería:
+	1 - Cuñas en cajas o paredes de labor. 
+	2 - Formación de lajas en cajas, cajas falsas. 
+	3 - Formación de lajas en cajas, techo de labor. 
+	4 - Zona de lajamientos al techo. 
+	5 - Pilar con zona de lajamiento. 
+	6 - Formación de bloques irregulares en techo. 
+	7 - Condición de roca muy fracturada. 
+	8 - Condición de estratos rocosos al techo.
+
+ Otras condiciones de riesgo. Veamos ahora otras condiciones de riesgo relacionadas con las rocas o macizos:
+    1 - Roca con bloques performados al techo. 
+    2 - Planos subhorizontales al techo y cajas de labor.
+    3 - Fallas geológicas. 
+
+Calidades de roca en labores mineras.
+Es posible encontrar rocas con fallas geológicas como la Falla Chavito de la imagen y también pueden aparecer rocas con presencia de diques intrusivos como podemos apreciar en la otra imagen. Aquí es posible visibilizar gráficamente la falla geológica y el dique intrusivo en la roca. 
+
+Revisemos ahora algunos bloques asociados a fallas geológicas:
+	1 - falla como estructura aislada, corte en roca. 
+	2 - fallas como estructuras múltiples, multiples cortes. 
+	3 - deslizamiento a través de una falla, corte con deslizamiento de material.
+
+ Esfuerzos in situ y deformación de roca. Existen dos tipos de esfuerzo in situ:
+ 	A - antes de excavar: son esfuerzos que se realizan antes de la excavación. 
+ 	B - después de excavar: son esfuerzos inducidos alrededor de una excavación simple. 
+
+ Estados tensionales. La medición de los estados tensionales se realiza mediante una perforación horizontal asistida por un sistema electrónico, mediante cables y sensores, que permiten medir la deformación del macizo rocoso en un sector determinado. Veamos cómo se realiza la medición de esfuerzos in situ MPC 2015. (video en taller)
+
+ Problemática del estallido de roca por altos esfuerzos. (ejemplos)
+  La imagen muestra una roca masivamente fracturada debido a que fue sometida a altos esfuerzos, ocurriendo astillamientos, lajamientos, reventasones y hasta estallidos de rocas. 
+
+  Aquí podemos ver una deformación en labor por altos esfuerzos. 
+
+  Y aquí observamos una deformación en labor por altos esfuerzos como la anterior, pero fortificada. 
+
+La caída de rocas asociadas a fallas geológicas y altos esfuerzos tiene que ver con problemas de inestabilidad cuando la excavación avanza paralela a una falla. 

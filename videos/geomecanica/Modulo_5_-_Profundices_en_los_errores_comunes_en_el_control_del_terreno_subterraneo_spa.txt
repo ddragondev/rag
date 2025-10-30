@@ -1,0 +1,28 @@
+Módulo 5: Errores comunes en el control del terreno subterráneo
+
+Bienvenido al módulo cinco. Aquí aprenderás a identificar casos de errores en el control del terreno y las buenas prácticas en la acuñadura manual. 
+
+Ejemplos:
+1 - Tenemos aquí claramente una condición deficiente en el techo de roca fracturada, indicada por la flecha. 
+(Imagen de cable de servicio en tunel instalado con roca suelta en un costado)
+
+Evaluación del riesgo deficiente. ¿Por qué? Porque se intenta realizar un trabajo sin antes haber eliminado la condición. Se debe eliminar la condición y después realizar el trabajo. En este caso traspasar un cable de servicio
+
+2 - Ejemplo Evaluación de riesgo deficiente. 
+(Imagen de minero en faena con maquinaria pesada bajo techumbre inestable)
+En este ejemplo, podemos ver que el operador trabaja mientras su techo se encuentra inestable. Además, hay un exceso de confianza que constituye un peligro de alto potencial. ¿Qué podríamos hacer en un caso como este? Hay que observar el color de la roca y el tipo de formación que tiene: planchones inestables. El mecánico debe retirar el equipo y se debe eliminar la condición antes de realizar el trabajo.
+
+3 - En este caso, existe una evaluación de riesgo deficiente por acuñadora deficiente o falta de acuñadura. 
+(Imagen de acuñadura en tunel no finalizada correctamente con desprendimiento desde el techo y con faena al lado)
+En posturas de trabajos, siempre revisar el estado de acuñadura previa. En caso de ser necesario, volver a reacuñar las posturas de trabajo 
+
+4 - El siguiente caso expone un peligro en el trabajo de acuñadura. 
+(Imagen de minero acuñano el tunel en angulo recto vertical sobre el)
+El ángulo de acuñadura es inapropiado, ya que se debe realizar en cuarenta y cinco grados, retirándose un poco el operador de la verticalidad del trabajo 
+
+Consideraciones básicas de acuñadura manual:
+ - Identificar condición de techos paredes. 
+ - Nunca acular o acuñar verticalmente. 
+ - Dimensiones adecuadas de acuñador para labor. 
+ - Realizar siempre en cuarenta y cinco grados. 
+ - No traspasar la línea de fuego (caida probable de rocas)

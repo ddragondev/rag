@@ -1,0 +1,33 @@
+Módulo 3: Tipos de calidades de macizos Rocosos
+
+Bienvenido al módulo tres. Aquí aprenderás a identificar los tipos de calidades de macizos rocosos 
+
+Para conocer y clasificar las calidades de la roca, es importante tener en cuenta su color o alteración, más las fisuras o grietas que puedan tener. Esto permite conocer la calidad de la roca.
+
+Por ejemplo, si el color de la roca es grisácea y tiene pocas o nulas grietas, nos encontramos frente a una roca de buena calidad, comúnmente llamada roca competente. En cambio, si el color de la roca es rojo o varias tonalidades, nos encontramos frente a una roca de mala calidad, comúnmente llamada roca incompetente.
+
+En la siguiente tabla, puedes apreciar de mejor manera la clasificación de la calidad de la roca. Recuerda, el factor clave es el color y presencia fisuras de la roca 
+
+Clasificación según R.M.R. de Bieniawski"89
+| Rango | Calidad Geotécnica |
+|----------|----------|
+| 81 - 100 | Muy Bueno |
+| 80 - 61 | Bueno |
+| 60 - 41 | Moderado |
+| 40 - 21 | Malo |
+| 80 - 100 | Muy Malo |
+
+
+Conozcamos a detalle cada clasificación de la calidad geomecánica de macizos rocosos:
+
+- Muy Bueno: Macizo rocoso muy competente, R.M.R. 81 a 100. Esta roca se caracteriza por alta resistencia, es muy dura, sin formación de bloques, muy rugosa, sin coloración en techos ni paredes, sin fallas geológicas, contorno parejo de labor. 
+
+- Bueno: Macizo rocoso competente, R.M.R. 61 a 80. Esta roca se caracteriza por alta resistencia, muy dura, con presencia de bloques in situ, rugosa, fallas o planos geológicos puntuales, leve alteración techos o paredes, evidencia de moldes de bloques.
+
+- Regular: Macizo rocoso de regular calidad, R.M.R. 41 a 60. Esta roca se caracteriza por resistencia media, menor dureza, aumento del fracturamiento, formación clara de bloques o planchones, aumento de fallas y planos geológicos. Aparece la alteración de colores en la ropa, difícil avance de labor, caída de roca, necesita soporte o fortificación.
+
+- Malo: Macizo rocoso de mala calidad, R.M.R. 21 a 40. Esta roca se caracteriza por baja resistencia (media a blanda), fuerte fracturamiento, bloques medianos (puño de la mano), abundan fallas, planos geológicos, fuerte alteración (diversos colores), difícil avance de labor por caída de roca, fortificación a la frente, frecuente la caída de roca 
+
+- Muy Malo: Macizo rocoso de muy mala calidad, R.M.R. 20 o menor. Las rocas de muy mala calidad son aquellas en las que es prácticamente imposible realizar algún tipo de trabajo debido a la peligrosidad de su estado, debiendo utilizar un sistema avanzado de túneles de fortificación los cuales no utilizan presencia humana.
+
+Conocimientos generales del módulo: Color o alteración de la roca + fisuras o grietas = calidad de la roca.

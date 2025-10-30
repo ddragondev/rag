@@ -1,0 +1,10 @@
+langchain
+langchain-community
+langchain-openai
+langchain-chroma
+fastapi
+uvicorn[standard]
+pypdf
+python-dotenv
+pydantic
+cryptography>=41.0.0
