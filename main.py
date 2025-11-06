@@ -38,7 +38,7 @@ app.add_middleware(
 llm = ChatOpenAI(
     model="gpt-4o-mini",
     temperature=0,
-    max_tokens=800,
+    max_tokens=2000,
     request_timeout=30
 )
 
