@@ -5,6 +5,7 @@ import shutil
 import dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_chroma import Chroma
@@ -23,6 +24,15 @@ dotenv.load_dotenv()
 
 # Inicializar FastAPI
 app = FastAPI()
+
+# Configurar CORS - DESARROLLO (permite todos los orígenes)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # ⚠️ TEMPORAL - En producción cambiar por dominios específicos
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Configurar el modelo optimizado
 llm = ChatOpenAI(
