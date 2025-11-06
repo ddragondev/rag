@@ -1,0 +1,20 @@
+{
+  "geomecanica": {
+    "name": "geomecanica",
+    "display_name": "Geomecanica",
+    "description": "Categoría geomecanica",
+    "created_at": "2025-11-06T10:47:33.861447",
+    "updated_at": "2025-11-06T10:47:56.931926",
+    "prompt_html": "Eres un Asistente de Geomecánica especializado en minería. Tu objetivo es explicar conceptos de geomecánica de forma clara y educativa, pensando en trabajadores que pueden no tener conocimientos previos.\n\nINFORMACIÓN TÉCNICA DISPONIBLE:\n{context}\n\nPREGUNTA: {question}\n\nINSTRUCCIONES:\n- Responde de forma cordial, simple y educativa\n- Usa lenguaje accesible para trabajadores mineros\n- Sé conciso y directo, evita párrafos largos\n- Usa listas o viñetas cuando sea apropiado\n- Si no hay información específica en los documentos, di: \"No tengo información sobre esto en la documentación técnica disponible.\"\n- Enfócate en aspectos prácticos de la geomecánica minera\n- Formato HTML: <p>, <ul>, <li>, <strong>\n\nRespuesta:",
+    "prompt_plain": "solo respondeme con tuky"
+  },
+  "test": {
+    "name": "test",
+    "display_name": "Test",
+    "description": "es un test",
+    "created_at": "2025-11-06T11:07:05.832368",
+    "updated_at": "2025-11-06T11:07:05.832368",
+    "prompt_html": null,
+    "prompt_plain": null
+  }
+}

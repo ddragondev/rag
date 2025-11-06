@@ -1,8 +1,10 @@
 import os
 import glob
+import json
+import shutil
 import dotenv
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse, HTMLResponse
 from pydantic import BaseModel
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_chroma import Chroma
@@ -12,9 +14,9 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import ChatOpenAI
 import hashlib
-from typing import Dict
-import json
+from typing import Dict, List, Optional
 import unicodedata
+from datetime import datetime
 
 # Cargar variables de entorno
 dotenv.load_dotenv()
@@ -34,6 +36,7 @@ llm = ChatOpenAI(
 vectorstore_cache: Dict[str, Chroma] = {}
 answer_cache: Dict[str, dict] = {}
 PERSIST_DIRECTORY = "chroma_db"
+CATEGORIES_CONFIG_FILE = "categories_config.json"
 
 # Modelos de datos
 class QuestionRequest(BaseModel):
@@ -47,6 +50,34 @@ class VideoQuestionRequest(BaseModel):
     category: str = "geomecanica"
     format: str = "both"
 
+class CategoryCreate(BaseModel):
+    name: str
+    display_name: str
+    description: str
+    prompt_html: Optional[str] = None
+    prompt_plain: Optional[str] = None
+
+class CategoryUpdate(BaseModel):
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    prompt_html: Optional[str] = None
+    prompt_plain: Optional[str] = None
+
+class PromptUpdate(BaseModel):
+    prompt_html: str
+    prompt_plain: str
+
+class CategoryInfo(BaseModel):
+    name: str
+    display_name: str
+    description: str
+    created_at: str
+    updated_at: str
+    file_count: int
+    has_custom_prompt: bool
+    prompt_html: Optional[str] = None
+    prompt_plain: Optional[str] = None
+
 
 def normalize_category(category: str) -> str:
     """Normaliza el nombre de la categoría."""
@@ -54,6 +85,193 @@ def normalize_category(category: str) -> str:
     category = unicodedata.normalize('NFD', category)
     category = ''.join(char for char in category if unicodedata.category(char) != 'Mn')
     return category
+
+
+def load_categories_config() -> dict:
+    """Carga la configuración de categorías desde archivo JSON."""
+    if os.path.exists(CATEGORIES_CONFIG_FILE):
+        with open(CATEGORIES_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+
+def save_categories_config(config: dict):
+    """Guarda la configuración de categorías en archivo JSON."""
+    with open(CATEGORIES_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+def get_category_info(category_name: str) -> dict:
+    """Obtiene información de una categoría específica."""
+    config = load_categories_config()
+    category_name = normalize_category(category_name)
+    
+    if category_name not in config:
+        return None
+    
+    # Contar archivos
+    docs_path = f"docs/{category_name}"
+    file_count = 0
+    if os.path.exists(docs_path):
+        file_count = len([f for f in os.listdir(docs_path) if f.endswith('.pdf')])
+    
+    category_data = config[category_name].copy()
+    category_data['file_count'] = file_count
+    category_data['has_custom_prompt'] = bool(category_data.get('prompt_html') or category_data.get('prompt_plain'))
+    
+    return category_data
+
+
+def get_default_prompts(category: str) -> tuple:
+    """Retorna prompts por defecto según la categoría."""
+    if category == "geomecanica":
+        html_prompt = """Eres un Asistente de Geomecánica especializado en minería. Tu objetivo es explicar conceptos de geomecánica de forma clara y educativa, pensando en trabajadores que pueden no tener conocimientos previos.
+
+INFORMACIÓN TÉCNICA DISPONIBLE:
+{context}
+
+PREGUNTA: {question}
+
+INSTRUCCIONES:
+- Responde de forma cordial, simple y educativa
+- Usa lenguaje accesible para trabajadores mineros
+- Sé conciso y directo, evita párrafos largos
+- Usa listas o viñetas cuando sea apropiado
+- Si no hay información específica en los documentos, di: "No tengo información sobre esto en la documentación técnica disponible."
+- Enfócate en aspectos prácticos de la geomecánica minera
+- Formato HTML: <p>, <ul>, <li>, <strong>
+
+Respuesta:"""
+        
+        plain_prompt = html_prompt.replace("- Formato HTML: <p>, <ul>, <li>, <strong>", "- Responde en texto plano")
+        
+    elif category == "compliance":
+        html_prompt = """Eres un Asistente de Compliance especializado en normativas mineras. Tu objetivo es explicar regulaciones, procedimientos y requisitos legales de forma clara y precisa.
+
+INFORMACIÓN NORMATIVA DISPONIBLE:
+{context}
+
+PREGUNTA: {question}
+
+INSTRUCCIONES:
+- Responde de forma profesional y precisa
+- Enfócate en aspectos legales y normativos
+- Cita artículos o secciones específicas cuando sea relevante
+- Sé claro sobre obligaciones y responsabilidades
+- Si no hay información específica, di: "No tengo información sobre esta normativa en la base de datos."
+- Formato HTML: <p>, <ul>, <li>, <strong>
+
+Respuesta:"""
+        
+        plain_prompt = html_prompt.replace("- Formato HTML: <p>, <ul>, <li>, <strong>", "- Responde en texto plano")
+        
+    else:
+        # Prompt genérico
+        html_prompt = """Basándote en la siguiente información de documentos técnicos, responde de forma directa y concisa:
+
+INFORMACIÓN DISPONIBLE:
+{context}
+
+PREGUNTA: {question}
+
+INSTRUCCIONES:
+- Responde directamente, sin mencionar "el contexto" o "los documentos"
+- Sé conciso y específico
+- Si la información no está disponible, di: "No tengo información sobre esto en la base de datos."
+- Usa formato HTML: <p>, <ul>, <li>, <strong>
+
+Respuesta:"""
+        
+        plain_prompt = html_prompt.replace("- Usa formato HTML: <p>, <ul>, <li>, <strong>", "- Usa texto plano")
+    
+    return html_prompt, plain_prompt
+
+
+def get_prompts_for_category(category: str) -> tuple:
+    """Obtiene los prompts para una categoría (personalizados o por defecto)."""
+    config = load_categories_config()
+    category = normalize_category(category)
+    
+    if category in config and (config[category].get('prompt_html') or config[category].get('prompt_plain')):
+        # Usar prompts personalizados
+        html_prompt = config[category].get('prompt_html')
+        plain_prompt = config[category].get('prompt_plain')
+        
+        # Si falta uno, usar el por defecto
+        if not html_prompt or not plain_prompt:
+            default_html, default_plain = get_default_prompts(category)
+            html_prompt = html_prompt or default_html
+            plain_prompt = plain_prompt or default_plain
+            
+        return html_prompt, plain_prompt
+    else:
+        # Usar prompts por defecto
+        return get_default_prompts(category)
+
+
+async def reindex_category_auto(category: str):
+    """Re-indexa una categoría automáticamente después de cambios en archivos."""
+    try:
+        category = normalize_category(category)
+        docs_path = f"docs/{category}"
+        
+        if not os.path.exists(docs_path):
+            return
+        
+        pdf_files = glob.glob(os.path.join(docs_path, "*.pdf"))
+        
+        if not pdf_files:
+            # Si no hay PDFs, eliminar vectorstore
+            if category in vectorstore_cache:
+                del vectorstore_cache[category]
+            return
+        
+        print(f"🔄 Re-indexando categoría '{category}' automáticamente...")
+        
+        # Eliminar de caché
+        if category in vectorstore_cache:
+            del vectorstore_cache[category]
+        
+        # Cargar documentos
+        documents = []
+        for pdf_file in pdf_files:
+            loader = PyPDFLoader(pdf_file)
+            documents.extend(loader.load())
+        
+        if not documents:
+            return
+        
+        # Dividir en chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1500,
+            chunk_overlap=150
+        )
+        splits = text_splitter.split_documents(documents)
+        
+        # Crear vectorstore
+        embeddings = OpenAIEmbeddings()
+        
+        # Eliminar colección existente
+        persist_path = os.path.join(PERSIST_DIRECTORY, category)
+        if os.path.exists(persist_path):
+            shutil.rmtree(persist_path)
+        
+        # Crear nueva colección
+        vectorstore = Chroma.from_documents(
+            documents=splits,
+            embedding=embeddings,
+            collection_name=category,
+            persist_directory=PERSIST_DIRECTORY
+        )
+        
+        # Guardar en caché
+        vectorstore_cache[category] = vectorstore
+        
+        print(f"✅ Categoría '{category}' re-indexada exitosamente ({len(splits)} chunks)")
+        
+    except Exception as e:
+        print(f"❌ Error re-indexando categoría '{category}': {str(e)}")
+        raise
 
 
 def get_cache_key(question: str, category: str, format_type: str) -> str:
@@ -252,42 +470,16 @@ async def ask_question(question_request: QuestionRequest):
             "format": format_type
         }
         
-        # Prompt SIMPLE y DIRECTO - Sin mencionar "contexto"
+        # Obtener prompts personalizados o por defecto
+        html_prompt_template, plain_prompt_template = get_prompts_for_category(category)
+        
         if format_type in ["html", "both"]:
-            prompt = f"""Basándote en la siguiente información de documentos técnicos, responde de forma directa y concisa:
-
-INFORMACIÓN DISPONIBLE:
-{context}
-
-PREGUNTA: {question}
-
-INSTRUCCIONES:
-- Responde directamente, sin mencionar "el contexto" o "los documentos"
-- Sé conciso y específico
-- Si la información no está disponible, di: "No tengo información sobre esto en la base de datos."
-- Usa formato HTML: <p>, <ul>, <li>, <strong>
-
-Respuesta:"""
-            
+            prompt = html_prompt_template.format(context=context, question=question)
             result["answer"] = llm.invoke(prompt).content
             result["sources"] = f"<ul>{sources_html}</ul>"
         
         if format_type in ["plain", "both"]:
-            prompt = f"""Basándote en la siguiente información de documentos técnicos, responde de forma directa y concisa:
-
-INFORMACIÓN DISPONIBLE:
-{context}
-
-PREGUNTA: {question}
-
-INSTRUCCIONES:
-- Responde directamente, sin mencionar "el contexto" o "los documentos"
-- Sé conciso y específico
-- Si la información no está disponible, di: "No tengo información sobre esto en la base de datos."
-- Usa texto plano
-
-Respuesta:"""
-            
+            prompt = plain_prompt_template.format(context=context, question=question)
             result["answer_plain"] = llm.invoke(prompt).content
             result["sources_plain"] = sources_plain
         
@@ -426,6 +618,191 @@ async def cache_stats():
     }
 
 
+@app.get("/categories/{category_name}/files")
+async def list_category_files(category_name: str):
+    """Lista archivos de una categoría."""
+    try:
+        category_name = normalize_category(category_name)
+        docs_path = f"docs/{category_name}"
+        
+        if not os.path.exists(docs_path):
+            raise HTTPException(status_code=404, detail=f"Category '{category_name}' not found")
+        
+        files = []
+        for filename in os.listdir(docs_path):
+            if filename.endswith('.pdf'):
+                filepath = os.path.join(docs_path, filename)
+                stat = os.stat(filepath)
+                files.append({
+                    "filename": filename,
+                    "size": stat.st_size,
+                    "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                })
+        
+        return {
+            "category": category_name,
+            "files": files,
+            "total": len(files)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/categories/{category_name}/upload")
+async def upload_file(category_name: str, file: UploadFile = File(...)):
+    """Sube un archivo PDF a una categoría."""
+    try:
+        category_name = normalize_category(category_name)
+        
+        # Verificar que es PDF
+        if not file.filename.endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        
+        # Crear directorio si no existe
+        docs_path = f"docs/{category_name}"
+        os.makedirs(docs_path, exist_ok=True)
+        
+        # Guardar archivo
+        file_path = os.path.join(docs_path, file.filename)
+        
+        # Verificar si ya existe
+        if os.path.exists(file_path):
+            raise HTTPException(status_code=400, detail=f"File '{file.filename}' already exists")
+        
+        # Escribir archivo
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Re-indexar automáticamente
+        await reindex_category_auto(category_name)
+        
+        # Limpiar caché de respuestas de esta categoría
+        keys_to_remove = [key for key in answer_cache.keys() if category_name in key]
+        for key in keys_to_remove:
+            del answer_cache[key]
+        
+        return {
+            "message": f"File '{file.filename}' uploaded successfully to category '{category_name}'",
+            "filename": file.filename,
+            "size": len(content),
+            "category": category_name
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/categories/{category_name}/prompt")
+async def update_category_prompt(category_name: str, prompt_data: PromptUpdate):
+    """Actualiza el prompt personalizado de una categoría."""
+    try:
+        category_name = normalize_category(category_name)
+        
+        # Verificar que la categoría existe
+        docs_path = f"docs/{category_name}"
+        if not os.path.exists(docs_path):
+            raise HTTPException(status_code=404, detail=f"Category '{category_name}' not found")
+        
+        # Cargar configuración
+        config = load_categories_config()
+        
+        # Si no existe en config, crear entrada básica
+        if category_name not in config:
+            now = datetime.now().isoformat()
+            config[category_name] = {
+                "name": category_name,
+                "display_name": category_name.title(),
+                "description": f"Categoría {category_name}",
+                "created_at": now,
+                "updated_at": now
+            }
+        
+        # Actualizar prompts
+        config[category_name]["prompt_html"] = prompt_data.prompt_html
+        config[category_name]["prompt_plain"] = prompt_data.prompt_plain
+        config[category_name]["updated_at"] = datetime.now().isoformat()
+        
+        save_categories_config(config)
+        
+        # Limpiar caché de respuestas de esta categoría
+        keys_to_remove = [key for key in answer_cache.keys() if category_name in key]
+        for key in keys_to_remove:
+            del answer_cache[key]
+        
+        return {
+            "message": f"Custom prompts updated for category '{category_name}'",
+            "category": get_category_info(category_name)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/categories/{category_name}/prompt")
+async def get_category_prompt(category_name: str):
+    """Obtiene los prompts de una categoría (personalizados o por defecto)."""
+    try:
+        category_name = normalize_category(category_name)
+        
+        # Obtener prompts (personalizados o por defecto)
+        html_prompt, plain_prompt = get_prompts_for_category(category_name)
+        
+        # Verificar si son personalizados
+        config = load_categories_config()
+        is_custom = category_name in config and (config[category_name].get('prompt_html') or config[category_name].get('prompt_plain'))
+        
+        return {
+            "category": category_name,
+            "prompt_html": html_prompt,
+            "prompt_plain": plain_prompt,
+            "is_custom": is_custom
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/categories/{category_name}/prompt")
+async def reset_category_prompt(category_name: str):
+    """Resetea los prompts de una categoría a los valores por defecto."""
+    try:
+        category_name = normalize_category(category_name)
+        
+        # Cargar configuración
+        config = load_categories_config()
+        
+        if category_name in config:
+            # Eliminar prompts personalizados
+            if 'prompt_html' in config[category_name]:
+                del config[category_name]['prompt_html']
+            if 'prompt_plain' in config[category_name]:
+                del config[category_name]['prompt_plain']
+            
+            config[category_name]["updated_at"] = datetime.now().isoformat()
+            save_categories_config(config)
+        
+        # Limpiar caché de respuestas de esta categoría
+        keys_to_remove = [key for key in answer_cache.keys() if category_name in key]
+        for key in keys_to_remove:
+            del answer_cache[key]
+        
+        return {
+            "message": f"Prompts reset to default for category '{category_name}'"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/cache/clear")
 async def clear_cache():
     """Limpia el caché."""
@@ -436,43 +813,897 @@ async def clear_cache():
 
 @app.get("/categories")
 async def list_categories():
-    """Lista categorías disponibles."""
+    """Lista categorías disponibles con información detallada."""
+    config = load_categories_config()
+    
+    # Obtener categorías de configuración
+    configured_categories = {}
+    for name, data in config.items():
+        category_info = get_category_info(name)
+        if category_info:
+            configured_categories[name] = category_info
+    
+    # Buscar categorías en filesystem que no estén en config
     docs_path = "docs"
-    if not os.path.exists(docs_path):
-        return {"categories": []}
+    filesystem_categories = {}
+    if os.path.exists(docs_path):
+        for d in os.listdir(docs_path):
+            dir_path = os.path.join(docs_path, d)
+            if os.path.isdir(dir_path) and not d.startswith('.'):
+                normalized_name = normalize_category(d)
+                if normalized_name not in configured_categories:
+                    # Crear entrada básica para categorías no configuradas
+                    file_count = len([f for f in os.listdir(dir_path) if f.endswith('.pdf')])
+                    filesystem_categories[normalized_name] = {
+                        "name": normalized_name,
+                        "display_name": d.title(),
+                        "description": f"Categoría {d} (no configurada)",
+                        "created_at": "unknown",
+                        "updated_at": "unknown",
+                        "file_count": file_count,
+                        "has_custom_prompt": False,
+                        "prompt_html": None,
+                        "prompt_plain": None
+                    }
     
-    categories = [
-        d for d in os.listdir(docs_path) 
-        if os.path.isdir(os.path.join(docs_path, d)) and not d.startswith('.')
-    ]
+    all_categories = {**configured_categories, **filesystem_categories}
     
-    return {"categories": categories}
+    return {
+        "categories": list(all_categories.values()),
+        "total": len(all_categories)
+    }
+
+
+@app.post("/categories")
+async def create_category(category: CategoryCreate):
+    """Crea una nueva categoría."""
+    try:
+        category_name = normalize_category(category.name)
+        
+        # Verificar que no existe
+        config = load_categories_config()
+        if category_name in config:
+            raise HTTPException(status_code=400, detail=f"Category '{category_name}' already exists")
+        
+        # Crear directorio
+        docs_path = f"docs/{category_name}"
+        os.makedirs(docs_path, exist_ok=True)
+        
+        # Crear entrada en configuración
+        now = datetime.now().isoformat()
+        config[category_name] = {
+            "name": category_name,
+            "display_name": category.display_name,
+            "description": category.description,
+            "created_at": now,
+            "updated_at": now,
+            "prompt_html": category.prompt_html,
+            "prompt_plain": category.prompt_plain
+        }
+        
+        save_categories_config(config)
+        
+        return {
+            "message": f"Category '{category_name}' created successfully",
+            "category": get_category_info(category_name)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/categories/{category_name}")
+async def get_category(category_name: str):
+    """Obtiene información detallada de una categoría."""
+    try:
+        category_name = normalize_category(category_name)
+        category_info = get_category_info(category_name)
+        
+        if not category_info:
+            # Verificar si existe en filesystem
+            docs_path = f"docs/{category_name}"
+            if os.path.exists(docs_path):
+                file_count = len([f for f in os.listdir(docs_path) if f.endswith('.pdf')])
+                return {
+                    "name": category_name,
+                    "display_name": category_name.title(),
+                    "description": f"Categoría {category_name} (no configurada)",
+                    "created_at": "unknown",
+                    "updated_at": "unknown",
+                    "file_count": file_count,
+                    "has_custom_prompt": False,
+                    "prompt_html": None,
+                    "prompt_plain": None
+                }
+            else:
+                raise HTTPException(status_code=404, detail=f"Category '{category_name}' not found")
+        
+        return category_info
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/categories/{category_name}")
+async def update_category(category_name: str, update_data: CategoryUpdate):
+    """Actualiza una categoría existente."""
+    try:
+        category_name = normalize_category(category_name)
+        
+        # Verificar que existe
+        config = load_categories_config()
+        if category_name not in config:
+            # Si no está en config pero existe en filesystem, crear entrada
+            docs_path = f"docs/{category_name}"
+            if not os.path.exists(docs_path):
+                raise HTTPException(status_code=404, detail=f"Category '{category_name}' not found")
+            
+            # Crear entrada básica
+            now = datetime.now().isoformat()
+            config[category_name] = {
+                "name": category_name,
+                "display_name": category_name.title(),
+                "description": f"Categoría {category_name}",
+                "created_at": now,
+                "updated_at": now
+            }
+        
+        # Actualizar campos
+        if update_data.display_name is not None:
+            config[category_name]["display_name"] = update_data.display_name
+        if update_data.description is not None:
+            config[category_name]["description"] = update_data.description
+        if update_data.prompt_html is not None:
+            config[category_name]["prompt_html"] = update_data.prompt_html
+        if update_data.prompt_plain is not None:
+            config[category_name]["prompt_plain"] = update_data.prompt_plain
+        
+        config[category_name]["updated_at"] = datetime.now().isoformat()
+        
+        save_categories_config(config)
+        
+        return {
+            "message": f"Category '{category_name}' updated successfully",
+            "category": get_category_info(category_name)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/categories/{category_name}")
+async def delete_category(category_name: str):
+    """Elimina una categoría y todos sus archivos."""
+    try:
+        category_name = normalize_category(category_name)
+        
+        # Eliminar directorio y archivos
+        docs_path = f"docs/{category_name}"
+        if os.path.exists(docs_path):
+            shutil.rmtree(docs_path)
+        
+        # Eliminar vectorstore
+        if category_name in vectorstore_cache:
+            del vectorstore_cache[category_name]
+        
+        vectorstore_path = os.path.join(PERSIST_DIRECTORY, category_name)
+        if os.path.exists(vectorstore_path):
+            shutil.rmtree(vectorstore_path)
+        
+        # Eliminar de configuración
+        config = load_categories_config()
+        if category_name in config:
+            del config[category_name]
+            save_categories_config(config)
+        
+        # Limpiar caché de respuestas relacionadas
+        keys_to_remove = [key for key in answer_cache.keys() if category_name in key]
+        for key in keys_to_remove:
+            del answer_cache[key]
+        
+        return {
+            "message": f"Category '{category_name}' deleted successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/")
 async def root():
     """Info de la API."""
     return {
-        "message": "PDF & Video RAG API - ⚡ OPTIMIZADA Y DIRECTA",
-        "version": "3.0 - AI-Powered Simple",
-        "philosophy": "Respuestas directas y concisas. La IA evalúa relevancia sin mencionar 'contexto'.",
-        "optimizations": [
-            "✅ gpt-4o-mini: 15-20x más rápido",
-            "✅ Caché de respuestas: <50ms para repetidas",
-            "✅ MMR search: Mejor relevancia (k=2)",
-            "✅ Prompts directos: Sin mencionar 'contexto'",
-            "✅ Respuestas concisas: Información específica"
+        "message": "PDF & Video RAG API - 🎛️ GESTIÓN AVANZADA",
+        "version": "4.0 - Category Management System",
+        "philosophy": "Sistema completo de gestión de categorías, archivos y prompts personalizados.",
+        "features": [
+            "✅ Gestión completa de categorías",
+            "✅ Subida/eliminación de archivos por API",
+            "✅ Prompts personalizados por categoría",
+            "✅ Re-indexación automática",
+            "✅ Panel de administración web",
+            "✅ Caché inteligente",
+            "✅ gpt-4o-mini optimizado"
         ],
         "endpoints": {
-            "/ask": "POST - Consulta PDFs por categoría",
-            "/ask-video": "POST - Consulta videos por ID",
-            "/videos/{category}": "GET - Lista videos disponibles",
-            "/categories": "GET - Lista categorías de PDFs",
-            "/cache/stats": "GET - Estadísticas del caché",
-            "/cache/clear": "DELETE - Limpia caché de respuestas"
+            "management": {
+                "/admin": "GET - Panel de administración web",
+                "/categories": "GET - Lista categorías, POST - Crear categoría",
+                "/categories/{name}": "GET - Info, PUT - Actualizar, DELETE - Eliminar",
+                "/categories/{name}/files": "GET - Lista archivos",
+                "/categories/{name}/upload": "POST - Subir archivo PDF",
+                "/categories/{name}/files/{filename}": "DELETE - Eliminar archivo",
+                "/categories/{name}/prompt": "GET/PUT/DELETE - Gestión prompts"
+            },
+            "queries": {
+                "/ask": "POST - Consulta PDFs por categoría",
+                "/ask-video": "POST - Consulta videos por ID",
+                "/videos/{category}": "GET - Lista videos disponibles"
+            },
+            "system": {
+                "/cache/stats": "GET - Estadísticas del caché",
+                "/cache/clear": "DELETE - Limpia caché de respuestas"
+            }
         },
-        "note": "Los documentos deben estar indexados. Ejecuta: python reindex_documents.py"
+        "note": "Usa /admin para gestionar el sistema desde el navegador"
     }
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_panel():
+    """Panel de administración web."""
+    html_content = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎛️ Panel de Administración RAG</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            background: white; 
+            border-radius: 15px; 
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header { 
+            background: linear-gradient(45deg, #667eea, #764ba2); 
+            color: white; 
+            padding: 30px; 
+            text-align: center; 
+        }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .header p { opacity: 0.9; font-size: 1.1em; }
+        .nav { 
+            background: #f8f9fa; 
+            padding: 0; 
+            border-bottom: 1px solid #e9ecef; 
+        }
+        .nav-btn { 
+            background: none; 
+            border: none; 
+            padding: 20px 30px; 
+            cursor: pointer; 
+            font-size: 1em; 
+            transition: all 0.3s;
+            border-bottom: 3px solid transparent;
+        }
+        .nav-btn:hover { background: #e9ecef; }
+        .nav-btn.active { 
+            background: white; 
+            border-bottom-color: #667eea; 
+            color: #667eea;
+            font-weight: bold;
+        }
+        .content { padding: 30px; min-height: 400px; }
+        .section { display: none; }
+        .section.active { display: block; }
+        
+        .card { 
+            background: #f8f9fa; 
+            border-radius: 10px; 
+            padding: 20px; 
+            margin: 20px 0; 
+            border-left: 4px solid #667eea; 
+        }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { 
+            display: block; 
+            margin-bottom: 5px; 
+            font-weight: bold; 
+            color: #495057; 
+        }
+        .form-group input, .form-group textarea, .form-group select { 
+            width: 100%; 
+            padding: 12px; 
+            border: 2px solid #e9ecef; 
+            border-radius: 5px; 
+            font-size: 1em;
+            transition: border-color 0.3s;
+        }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus { 
+            outline: none; 
+            border-color: #667eea; 
+        }
+        .btn { 
+            background: #667eea; 
+            color: white; 
+            border: none; 
+            padding: 12px 24px; 
+            border-radius: 5px; 
+            cursor: pointer; 
+            font-size: 1em;
+            transition: background 0.3s;
+            margin-right: 10px;
+        }
+        .btn:hover { background: #5a6fd8; }
+        .btn-danger { background: #dc3545; }
+        .btn-danger:hover { background: #c82333; }
+        .btn-success { background: #28a745; }
+        .btn-success:hover { background: #218838; }
+        
+        .category-item { 
+            background: white; 
+            border: 1px solid #e9ecef; 
+            border-radius: 8px; 
+            padding: 20px; 
+            margin: 10px 0; 
+            transition: box-shadow 0.3s;
+        }
+        .category-item:hover { box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+        .category-header { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 10px; 
+        }
+        .category-name { font-size: 1.2em; font-weight: bold; color: #495057; }
+        .category-info { color: #6c757d; font-size: 0.9em; }
+        .file-item { 
+            background: #f8f9fa; 
+            padding: 10px; 
+            margin: 5px 0; 
+            border-radius: 5px; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+        }
+        
+        .status { 
+            padding: 4px 12px; 
+            border-radius: 20px; 
+            font-size: 0.8em; 
+            font-weight: bold; 
+        }
+        .status.success { background: #d4edda; color: #155724; }
+        .status.warning { background: #fff3cd; color: #856404; }
+        .status.info { background: #cce7ff; color: #004085; }
+        
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .loading { text-align: center; padding: 40px; color: #6c757d; }
+        .error { color: #dc3545; background: #f8d7da; padding: 10px; border-radius: 5px; margin: 10px 0; }
+        .success { color: #155724; background: #d4edda; padding: 10px; border-radius: 5px; margin: 10px 0; }
+        
+        #dropZone {
+            border: 2px dashed #667eea;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            background: #f8f9ff;
+            margin: 20px 0;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+        #dropZone:hover, #dropZone.dragover {
+            border-color: #5a6fd8;
+            background: #f0f2ff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎛️ Panel de Administración RAG</h1>
+            <p>Gestión completa de categorías, archivos y prompts personalizados</p>
+        </div>
+        
+        <div class="nav">
+            <button class="nav-btn active" onclick="showSection('categories')">📁 Categorías</button>
+            <button class="nav-btn" onclick="showSection('upload')">📤 Subir Archivos</button>
+            <button class="nav-btn" onclick="showSection('prompts')">🤖 Prompts</button>
+            <button class="nav-btn" onclick="showSection('system')">⚙️ Sistema</button>
+        </div>
+        
+        <div class="content">
+            <div id="categories" class="section active">
+                <h2>📁 Gestión de Categorías</h2>
+                <div class="card">
+                    <h3>Crear Nueva Categoría</h3>
+                    <form id="createCategoryForm">
+                        <div class="form-group">
+                            <label for="categoryName">Nombre interno (sin espacios, minúsculas):</label>
+                            <input type="text" id="categoryName" placeholder="ej: seguridad_industrial" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="categoryDisplayName">Nombre para mostrar:</label>
+                            <input type="text" id="categoryDisplayName" placeholder="ej: Seguridad Industrial" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="categoryDescription">Descripción:</label>
+                            <textarea id="categoryDescription" rows="3" placeholder="Descripción de la categoría..."></textarea>
+                        </div>
+                        <button type="submit" class="btn">Crear Categoría</button>
+                    </form>
+                </div>
+                
+                <div class="card">
+                    <h3>Categorías Existentes</h3>
+                    <div id="categoriesList" class="loading">Cargando categorías...</div>
+                </div>
+            </div>
+            
+            <div id="upload" class="section">
+                <h2>📤 Subir Archivos</h2>
+                <div class="card">
+                    <h3>Seleccionar Categoría y Archivos</h3>
+                    <div class="form-group">
+                        <label for="uploadCategory">Categoría:</label>
+                        <select id="uploadCategory">
+                            <option value="">Selecciona una categoría...</option>
+                        </select>
+                    </div>
+                    
+                    <div id="dropZone" onclick="document.getElementById('fileInput').click()">
+                        <p>📎 Arrastra archivos PDF aquí o haz clic para seleccionar</p>
+                        <p style="color: #6c757d; margin-top: 10px;">Solo archivos PDF son permitidos</p>
+                    </div>
+                    <input type="file" id="fileInput" multiple accept=".pdf" style="display: none;">
+                    
+                    <div id="uploadProgress" style="display: none;">
+                        <h4>Subiendo archivos...</h4>
+                        <div id="uploadList"></div>
+                    </div>
+                </div>
+                
+                <div class="card" id="filesSection" style="display: none;">
+                    <h3>Archivos en Categoría</h3>
+                    <div id="filesList"></div>
+                </div>
+            </div>
+            
+            <div id="prompts" class="section">
+                <h2>🤖 Gestión de Prompts</h2>
+                <div class="card">
+                    <h3>Configurar Prompts Personalizados</h3>
+                    <div class="form-group">
+                        <label for="promptCategory">Categoría:</label>
+                        <select id="promptCategory">
+                            <option value="">Selecciona una categoría...</option>
+                        </select>
+                    </div>
+                    
+                    <div id="promptEditor" style="display: none;">
+                        <div class="form-group">
+                            <label for="promptHtml">Prompt para formato HTML:</label>
+                            <textarea id="promptHtml" rows="10" placeholder="Prompt para respuestas en HTML..."></textarea>
+                            <small style="color: #6c757d;">Usa {context} y {question} como variables</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="promptPlain">Prompt para formato texto:</label>
+                            <textarea id="promptPlain" rows="10" placeholder="Prompt para respuestas en texto plano..."></textarea>
+                            <small style="color: #6c757d;">Usa {context} y {question} como variables</small>
+                        </div>
+                        <button type="button" class="btn" onclick="savePrompt()">Guardar Prompts</button>
+                        <button type="button" class="btn btn-danger" onclick="resetPrompt()">Restaurar por Defecto</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="system" class="section">
+                <h2>⚙️ Estado del Sistema</h2>
+                <div class="grid">
+                    <div class="card">
+                        <h3>📊 Estadísticas</h3>
+                        <div id="systemStats" class="loading">Cargando estadísticas...</div>
+                    </div>
+                    <div class="card">
+                        <h3>🧹 Mantenimiento</h3>
+                        <button class="btn btn-danger" onclick="clearCache()">Limpiar Caché</button>
+                        <p style="margin-top: 10px; color: #6c757d;">Elimina todas las respuestas cacheadas</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Variables globales
+        let categories = [];
+        
+        // Funciones de navegación
+        function showSection(sectionName) {
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+            
+            document.getElementById(sectionName).classList.add('active');
+            event.target.classList.add('active');
+            
+            if (sectionName === 'categories') loadCategories();
+            if (sectionName === 'upload') loadCategoriesForUpload();
+            if (sectionName === 'prompts') loadCategoriesForPrompts();
+            if (sectionName === 'system') loadSystemStats();
+        }
+        
+        // Cargar categorías
+        async function loadCategories() {
+            try {
+                const response = await fetch('/categories');
+                const data = await response.json();
+                categories = data.categories;
+                
+                const html = categories.map(cat => `
+                    <div class="category-item">
+                        <div class="category-header">
+                            <div>
+                                <div class="category-name">${cat.display_name}</div>
+                                <div class="category-info">
+                                    ${cat.name} • ${cat.file_count} archivos • 
+                                    <span class="status ${cat.has_custom_prompt ? 'success' : 'info'}">
+                                        ${cat.has_custom_prompt ? 'Prompt personalizado' : 'Prompt por defecto'}
+                                    </span>
+                                </div>
+                            </div>
+                            <div>
+                                <button class="btn" onclick="editCategory('${cat.name}')">Editar</button>
+                                <button class="btn btn-danger" onclick="deleteCategory('${cat.name}')">Eliminar</button>
+                            </div>
+                        </div>
+                        <p>${cat.description}</p>
+                    </div>
+                `).join('');
+                
+                document.getElementById('categoriesList').innerHTML = html || '<p>No hay categorías configuradas.</p>';
+            } catch (error) {
+                document.getElementById('categoriesList').innerHTML = '<div class="error">Error cargando categorías: ' + error.message + '</div>';
+            }
+        }
+        
+        // Crear categoría
+        document.getElementById('createCategoryForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const data = {
+                name: document.getElementById('categoryName').value,
+                display_name: document.getElementById('categoryDisplayName').value,
+                description: document.getElementById('categoryDescription').value
+            };
+            
+            try {
+                const response = await fetch('/categories', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                if (response.ok) {
+                    document.getElementById('createCategoryForm').reset();
+                    loadCategories();
+                    showMessage('Categoría creada exitosamente', 'success');
+                } else {
+                    const error = await response.json();
+                    showMessage('Error: ' + error.detail, 'error');
+                }
+            } catch (error) {
+                showMessage('Error creando categoría: ' + error.message, 'error');
+            }
+        });
+        
+        // Eliminar categoría
+        async function deleteCategory(name) {
+            if (!confirm(`¿Estás seguro de que quieres eliminar la categoría "${name}" y todos sus archivos?`)) return;
+            
+            try {
+                const response = await fetch(`/categories/${name}`, { method: 'DELETE' });
+                if (response.ok) {
+                    loadCategories();
+                    showMessage('Categoría eliminada exitosamente', 'success');
+                } else {
+                    const error = await response.json();
+                    showMessage('Error: ' + error.detail, 'error');
+                }
+            } catch (error) {
+                showMessage('Error eliminando categoría: ' + error.message, 'error');
+            }
+        }
+        
+        // Cargar categorías para upload
+        async function loadCategoriesForUpload() {
+            const select = document.getElementById('uploadCategory');
+            select.innerHTML = '<option value="">Selecciona una categoría...</option>';
+            
+            categories.forEach(cat => {
+                select.innerHTML += `<option value="${cat.name}">${cat.display_name}</option>`;
+            });
+            
+            select.addEventListener('change', loadCategoryFiles);
+        }
+        
+        // Cargar archivos de categoría
+        async function loadCategoryFiles() {
+            const category = document.getElementById('uploadCategory').value;
+            if (!category) {
+                document.getElementById('filesSection').style.display = 'none';
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/categories/${category}/files`);
+                const data = await response.json();
+                
+                const html = data.files.map(file => `
+                    <div class="file-item">
+                        <div>
+                            <strong>${file.filename}</strong>
+                            <small style="color: #6c757d; margin-left: 10px;">
+                                ${(file.size / 1024 / 1024).toFixed(2)} MB
+                            </small>
+                        </div>
+                        <button class="btn btn-danger" onclick="deleteFile('${category}', '${file.filename}')">
+                            Eliminar
+                        </button>
+                    </div>
+                `).join('');
+                
+                document.getElementById('filesList').innerHTML = html || '<p>No hay archivos en esta categoría.</p>';
+                document.getElementById('filesSection').style.display = 'block';
+            } catch (error) {
+                showMessage('Error cargando archivos: ' + error.message, 'error');
+            }
+        }
+        
+        // Configurar drag & drop y upload
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, preventDefaults, false);
+        });
+        
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, () => dropZone.classList.add('dragover'), false);
+        });
+        
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, () => dropZone.classList.remove('dragover'), false);
+        });
+        
+        dropZone.addEventListener('drop', handleDrop, false);
+        fileInput.addEventListener('change', handleFileSelect, false);
+        
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        
+        function handleDrop(e) {
+            const files = Array.from(e.dataTransfer.files);
+            uploadFiles(files);
+        }
+        
+        function handleFileSelect(e) {
+            const files = Array.from(e.target.files);
+            uploadFiles(files);
+        }
+        
+        async function uploadFiles(files) {
+            const category = document.getElementById('uploadCategory').value;
+            if (!category) {
+                showMessage('Selecciona una categoría primero', 'error');
+                return;
+            }
+            
+            const pdfFiles = files.filter(file => file.type === 'application/pdf');
+            if (pdfFiles.length === 0) {
+                showMessage('Solo se permiten archivos PDF', 'error');
+                return;
+            }
+            
+            const uploadProgress = document.getElementById('uploadProgress');
+            const uploadList = document.getElementById('uploadList');
+            uploadProgress.style.display = 'block';
+            uploadList.innerHTML = '';
+            
+            for (const file of pdfFiles) {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                uploadList.innerHTML += `<div id="file-${file.name}">📄 ${file.name} - Subiendo...</div>`;
+                
+                try {
+                    const response = await fetch(`/categories/${category}/upload`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (response.ok) {
+                        document.getElementById(`file-${file.name}`).innerHTML = `✅ ${file.name} - Completado`;
+                    } else {
+                        const error = await response.json();
+                        document.getElementById(`file-${file.name}`).innerHTML = `❌ ${file.name} - Error: ${error.detail}`;
+                    }
+                } catch (error) {
+                    document.getElementById(`file-${file.name}`).innerHTML = `❌ ${file.name} - Error: ${error.message}`;
+                }
+            }
+            
+            loadCategoryFiles();
+            showMessage('Subida completada', 'success');
+        }
+        
+        // Eliminar archivo
+        async function deleteFile(category, filename) {
+            if (!confirm(`¿Eliminar el archivo "${filename}"?`)) return;
+            
+            try {
+                const response = await fetch(`/categories/${category}/files/${filename}`, { method: 'DELETE' });
+                if (response.ok) {
+                    loadCategoryFiles();
+                    showMessage('Archivo eliminado exitosamente', 'success');
+                } else {
+                    const error = await response.json();
+                    showMessage('Error: ' + error.detail, 'error');
+                }
+            } catch (error) {
+                showMessage('Error eliminando archivo: ' + error.message, 'error');
+            }
+        }
+        
+        // Gestión de prompts
+        async function loadCategoriesForPrompts() {
+            const select = document.getElementById('promptCategory');
+            select.innerHTML = '<option value="">Selecciona una categoría...</option>';
+            
+            categories.forEach(cat => {
+                select.innerHTML += `<option value="${cat.name}">${cat.display_name}</option>`;
+            });
+            
+            select.addEventListener('change', loadCategoryPrompt);
+        }
+        
+        async function loadCategoryPrompt() {
+            const category = document.getElementById('promptCategory').value;
+            if (!category) {
+                document.getElementById('promptEditor').style.display = 'none';
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/categories/${category}/prompt`);
+                const data = await response.json();
+                
+                document.getElementById('promptHtml').value = data.prompt_html || '';
+                document.getElementById('promptPlain').value = data.prompt_plain || '';
+                document.getElementById('promptEditor').style.display = 'block';
+            } catch (error) {
+                showMessage('Error cargando prompt: ' + error.message, 'error');
+            }
+        }
+        
+        async function savePrompt() {
+            const category = document.getElementById('promptCategory').value;
+            const data = {
+                prompt_html: document.getElementById('promptHtml').value,
+                prompt_plain: document.getElementById('promptPlain').value
+            };
+            
+            try {
+                const response = await fetch(`/categories/${category}/prompt`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                if (response.ok) {
+                    showMessage('Prompts guardados exitosamente', 'success');
+                } else {
+                    const error = await response.json();
+                    showMessage('Error: ' + error.detail, 'error');
+                }
+            } catch (error) {
+                showMessage('Error guardando prompts: ' + error.message, 'error');
+            }
+        }
+        
+        async function resetPrompt() {
+            const category = document.getElementById('promptCategory').value;
+            if (!confirm('¿Restaurar prompts por defecto?')) return;
+            
+            try {
+                const response = await fetch(`/categories/${category}/prompt`, { method: 'DELETE' });
+                if (response.ok) {
+                    loadCategoryPrompt();
+                    showMessage('Prompts restaurados por defecto', 'success');
+                } else {
+                    const error = await response.json();
+                    showMessage('Error: ' + error.detail, 'error');
+                }
+            } catch (error) {
+                showMessage('Error restaurando prompts: ' + error.message, 'error');
+            }
+        }
+        
+        // Estadísticas del sistema
+        async function loadSystemStats() {
+            try {
+                const response = await fetch('/cache/stats');
+                const data = await response.json();
+                
+                document.getElementById('systemStats').innerHTML = `
+                    <p><strong>Caché de respuestas:</strong> ${data.answer_cache_size}/${data.answer_cache_max} items</p>
+                    <p><strong>Vectorstores cargados:</strong> ${data.vectorstore_cache_size} categorías</p>
+                    <p><strong>Categorías totales:</strong> ${categories.length}</p>
+                `;
+            } catch (error) {
+                document.getElementById('systemStats').innerHTML = '<div class="error">Error cargando estadísticas</div>';
+            }
+        }
+        
+        async function clearCache() {
+            if (!confirm('¿Limpiar toda la caché de respuestas?')) return;
+            
+            try {
+                const response = await fetch('/cache/clear', { method: 'DELETE' });
+                if (response.ok) {
+                    loadSystemStats();
+                    showMessage('Caché limpiada exitosamente', 'success');
+                } else {
+                    showMessage('Error limpiando caché', 'error');
+                }
+            } catch (error) {
+                showMessage('Error: ' + error.message, 'error');
+            }
+        }
+        
+        // Mostrar mensajes
+        function showMessage(message, type) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = type;
+            messageDiv.textContent = message;
+            messageDiv.style.position = 'fixed';
+            messageDiv.style.top = '20px';
+            messageDiv.style.right = '20px';
+            messageDiv.style.zIndex = '1000';
+            messageDiv.style.padding = '15px';
+            messageDiv.style.borderRadius = '5px';
+            messageDiv.style.boxShadow = '0 5px 15px rgba(0,0,0,0.2)';
+            
+            document.body.appendChild(messageDiv);
+            
+            setTimeout(() => {
+                messageDiv.remove();
+            }, 5000);
+        }
+        
+        // Cargar datos iniciales
+        loadCategories();
+    </script>
+</body>
+</html>
+    """
+    return HTMLResponse(content=html_content)
 
 
 @app.on_event("shutdown")

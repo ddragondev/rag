@@ -3,12 +3,14 @@
 ## 📋 Requisitos del Servidor
 
 ### Hardware Mínimo
+
 - **RAM**: 4GB (recomendado 8GB)
 - **CPU**: 2 cores (recomendado 4 cores)
 - **Almacenamiento**: 10GB libres (para documentos y base de datos vectorial)
 - **Conexión**: Internet estable para API de OpenAI
 
 ### Software
+
 - **Ubuntu**: 20.04 LTS o superior
 - **Python**: 3.9+ (recomendado 3.11)
 - **Acceso**: SSH o acceso directo al servidor
@@ -18,6 +20,7 @@
 ## 🛠️ Instalación Paso a Paso
 
 ### Paso 1: Actualizar el Sistema
+
 ```bash
 # Conectar al servidor
 ssh usuario@tu-servidor-ubuntu
@@ -30,6 +33,7 @@ sudo apt install -y python3 python3-pip python3-venv git curl nginx supervisor
 ```
 
 ### Paso 2: Crear Usuario para la Aplicación
+
 ```bash
 # Crear usuario específico para la app (más seguro)
 sudo useradd -m -s /bin/bash ragapp
@@ -40,6 +44,7 @@ sudo su - ragapp
 ```
 
 ### Paso 3: Clonar/Transferir el Proyecto
+
 ```bash
 # Opción A: Si tienes Git
 git clone https://github.com/tu-usuario/tu-repo.git pdf-rag
@@ -54,6 +59,7 @@ cd /home/ragapp/pdf-rag
 ```
 
 ### Paso 4: Configurar Entorno Virtual
+
 ```bash
 # Crear entorno virtual
 python3 -m venv venv
@@ -73,6 +79,7 @@ pip install pypdf unstructured[pdf]
 ```
 
 ### Paso 5: Configurar Variables de Entorno
+
 ```bash
 # Crear archivo .env
 nano .env
@@ -85,6 +92,7 @@ HOST=0.0.0.0
 ```
 
 ### Paso 6: Transferir Documentos
+
 ```bash
 # Crear estructura de carpetas
 mkdir -p docs/geomecanica docs/compliance videos/geomecanica
@@ -96,6 +104,7 @@ scp -r /Users/ddragondev/Documents/OpenAI-PDF-RAG-LangChain-master/videos/* raga
 ```
 
 ### Paso 7: Indexar Documentos
+
 ```bash
 # Activar entorno virtual
 source venv/bin/activate
@@ -112,12 +121,14 @@ ls -la chroma_db/
 ## 🔧 Configuración del Servicio
 
 ### Paso 8: Crear Servicio Systemd
+
 ```bash
 # Crear archivo de servicio
 sudo nano /etc/systemd/system/pdf-rag.service
 ```
 
 **Contenido del archivo:**
+
 ```ini
 [Unit]
 Description=PDF RAG API Service
@@ -127,9 +138,9 @@ After=network.target
 Type=simple
 User=ragapp
 Group=ragapp
-WorkingDirectory=/home/ragapp/pdf-rag
-Environment=PATH=/home/ragapp/pdf-rag/venv/bin
-ExecStart=/home/ragapp/pdf-rag/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+WorkingDirectory=/var/www/rag
+Environment=PATH=/var/www/rag/venv/bin
+ExecStart=/var/www/rag/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=3
 
@@ -138,6 +149,7 @@ WantedBy=multi-user.target
 ```
 
 ### Paso 9: Habilitar y Iniciar Servicio
+
 ```bash
 # Recargar systemd
 sudo systemctl daemon-reload
@@ -147,6 +159,7 @@ sudo systemctl enable pdf-rag
 
 # Iniciar servicio
 sudo systemctl start pdf-rag
+sudo systemctl stop pdf-rag
 
 # Verificar estado
 sudo systemctl status pdf-rag
@@ -160,12 +173,14 @@ sudo journalctl -u pdf-rag -f
 ## 🌐 Configuración de Nginx (Proxy Inverso)
 
 ### Paso 10: Configurar Nginx
+
 ```bash
 # Crear configuración de sitio
 sudo nano /etc/nginx/sites-available/pdf-rag
 ```
 
 **Contenido del archivo:**
+
 ```nginx
 server {
     listen 80;
@@ -177,7 +192,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
+
         # Timeouts para respuestas largas
         proxy_read_timeout 300;
         proxy_connect_timeout 300;
@@ -187,6 +202,7 @@ server {
 ```
 
 ### Paso 11: Activar Sitio
+
 ```bash
 # Habilitar sitio
 sudo ln -s /etc/nginx/sites-available/pdf-rag /etc/nginx/sites-enabled/
@@ -206,6 +222,7 @@ sudo systemctl enable nginx
 ## 🔒 Configuración de Firewall
 
 ### Paso 12: Configurar UFW
+
 ```bash
 # Habilitar firewall
 sudo ufw enable
@@ -226,6 +243,7 @@ sudo ufw status
 ## 🛡️ SSL/HTTPS con Let's Encrypt (Opcional pero Recomendado)
 
 ### Paso 13: Configurar HTTPS
+
 ```bash
 # Instalar certbot
 sudo apt install -y certbot python3-certbot-nginx
@@ -264,12 +282,14 @@ free -h
 ```
 
 ### Configurar Logrotate
+
 ```bash
 # Crear configuración de rotación de logs
 sudo nano /etc/logrotate.d/pdf-rag
 ```
 
 **Contenido:**
+
 ```
 /var/log/pdf-rag/*.log {
     daily
@@ -299,12 +319,13 @@ curl -X POST "http://tu-servidor-ip/ask" \
   -H "Content-Type: application/json" \
   -d '{
     "question": "que es compliance?",
-    "category": "compliance", 
+    "category": "compliance",
     "format": "plain"
   }'
 ```
 
 ### Verificar Endpoints
+
 ```bash
 # Info de la API
 curl http://tu-servidor-ip/
@@ -324,17 +345,20 @@ curl http://tu-servidor-ip/videos/geomecanica
 ## 🚀 Optimizaciones de Producción
 
 ### Configuración de Uvicorn para Producción
+
 ```bash
 # Editar archivo de servicio para múltiples workers
 sudo nano /etc/systemd/system/pdf-rag.service
 ```
 
 **Cambiar ExecStart a:**
+
 ```ini
 ExecStart=/home/ragapp/pdf-rag/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4 --worker-class uvicorn.workers.UvicornWorker
 ```
 
 ### Configuración de Límites de Sistema
+
 ```bash
 # Editar límites del sistema
 sudo nano /etc/security/limits.conf
@@ -347,6 +371,7 @@ ragapp hard nproc 32768
 ```
 
 ### Configuración de Memoria Swap (si es necesario)
+
 ```bash
 # Crear archivo swap de 2GB
 sudo fallocate -l 2G /swapfile
@@ -363,12 +388,14 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ## 📱 Automatización de Backups
 
 ### Script de Backup
+
 ```bash
 # Crear script de backup
 nano /home/ragapp/backup_rag.sh
 ```
 
 **Contenido del script:**
+
 ```bash
 #!/bin/bash
 BACKUP_DIR="/home/ragapp/backups"
@@ -409,6 +436,7 @@ crontab -e
 ## 🔧 Mantenimiento
 
 ### Actualizar el Sistema
+
 ```bash
 # Detener servicio
 sudo systemctl stop pdf-rag
@@ -431,6 +459,7 @@ sudo systemctl start pdf-rag
 ```
 
 ### Agregar Nuevos Documentos
+
 ```bash
 # Transferir nuevos PDFs
 scp nuevo-documento.pdf ragapp@tu-servidor:/home/ragapp/pdf-rag/docs/compliance/
@@ -448,6 +477,7 @@ python reindex_documents.py
 ## ⚠️ Solución de Problemas
 
 ### Servicio no inicia
+
 ```bash
 # Ver logs detallados
 sudo journalctl -u pdf-rag -n 50
@@ -462,6 +492,7 @@ python -c "import fastapi; print('FastAPI OK')"
 ```
 
 ### Error de conexión a OpenAI
+
 ```bash
 # Verificar API key
 cat /home/ragapp/pdf-rag/.env
@@ -480,6 +511,7 @@ print('OpenAI connection OK')
 ```
 
 ### Nginx no funciona
+
 ```bash
 # Verificar configuración
 sudo nginx -t
@@ -492,6 +524,7 @@ sudo systemctl restart nginx
 ```
 
 ### Base de datos corrupta
+
 ```bash
 # Re-crear base de datos
 cd /home/ragapp/pdf-rag
@@ -505,6 +538,7 @@ python reindex_documents.py
 ## 📈 Monitoreo de Performance
 
 ### Instalar htop y iotop
+
 ```bash
 sudo apt install -y htop iotop
 
@@ -516,12 +550,14 @@ sudo iotop
 ```
 
 ### Script de Monitoreo Básico
+
 ```bash
 # Crear script de monitoreo
 nano /home/ragapp/monitor_rag.sh
 ```
 
 **Contenido:**
+
 ```bash
 #!/bin/bash
 echo "=== PDF RAG System Status ==="
@@ -572,7 +608,7 @@ http://tu-servidor-ip/
 # Consulta PDFs
 POST http://tu-servidor-ip/ask
 
-# Consulta Videos  
+# Consulta Videos
 POST http://tu-servidor-ip/ask-video
 
 # Lista Categorías
