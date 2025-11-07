@@ -45,6 +45,7 @@ llm = ChatOpenAI(
 # Cache global
 vectorstore_cache: Dict[str, Chroma] = {}
 answer_cache: Dict[str, dict] = {}
+conversation_history: Dict[str, List[dict]] = {}  # {session_id: [{role, content}, ...]}
 PERSIST_DIRECTORY = "chroma_db"
 CATEGORIES_CONFIG_FILE = "categories_config.json"
 
@@ -53,6 +54,7 @@ class QuestionRequest(BaseModel):
     question: str
     category: str
     format: str = "both"
+    session_id: Optional[str] = None  # Para mantener contexto conversacional
 
 class VideoQuestionRequest(BaseModel):
     question: str
@@ -298,6 +300,42 @@ def cache_answer(cache_key: str, answer: dict):
     answer_cache[cache_key] = answer
 
 
+def get_conversation_history(session_id: str) -> List[dict]:
+    """Obtiene el historial de conversación de una sesión."""
+    if session_id not in conversation_history:
+        conversation_history[session_id] = []
+    return conversation_history[session_id]
+
+
+def add_to_conversation(session_id: str, role: str, content: str):
+    """Agrega un mensaje al historial de conversación."""
+    if session_id not in conversation_history:
+        conversation_history[session_id] = []
+    
+    conversation_history[session_id].append({
+        "role": role,
+        "content": content
+    })
+    
+    # Mantener solo las últimas 10 interacciones (20 mensajes)
+    if len(conversation_history[session_id]) > 20:
+        conversation_history[session_id] = conversation_history[session_id][-20:]
+
+
+def format_conversation_context(history: List[dict]) -> str:
+    """Formatea el historial de conversación para incluirlo en el prompt."""
+    if not history:
+        return ""
+    
+    context_lines = ["HISTORIAL DE CONVERSACIÓN PREVIA:"]
+    for msg in history[-6:]:  # Últimas 3 interacciones (6 mensajes)
+        role = "Usuario" if msg["role"] == "user" else "Asistente"
+        context_lines.append(f"{role}: {msg['content']}")
+    
+    context_lines.append("\n---\n")
+    return "\n".join(context_lines)
+
+
 def get_or_create_vectorstore(category: str):
     """Obtiene el vectorstore para una categoría (usa nombres simples)."""
     category = normalize_category(category)
@@ -443,16 +481,21 @@ async def ask_question(question_request: QuestionRequest):
     question = question_request.question
     category = normalize_category(question_request.category)
     format_type = question_request.format.lower()
+    session_id = question_request.session_id
     
     if format_type not in ["html", "plain", "both"]:
         raise HTTPException(status_code=400, detail="Invalid format")
 
     try:
-        # Verificar caché
-        cache_key = get_cache_key(question, category, format_type)
-        if cache_key in answer_cache:
-            print(f"⚡ Respuesta del caché")
-            return answer_cache[cache_key]
+        # Si hay session_id, NO usar caché (para conversaciones con contexto)
+        use_cache = session_id is None
+        
+        if use_cache:
+            # Verificar caché solo si no hay sesión
+            cache_key = get_cache_key(question, category, format_type)
+            if cache_key in answer_cache:
+                print(f"⚡ Respuesta del caché")
+                return answer_cache[cache_key]
         
         # Obtener vectorstore y buscar documentos relevantes
         vectorstore = get_or_create_vectorstore(category)
@@ -480,21 +523,46 @@ async def ask_question(question_request: QuestionRequest):
             "format": format_type
         }
         
+        # Si hay session_id, agregar historial conversacional
+        conversation_context = ""
+        if session_id:
+            history = get_conversation_history(session_id)
+            conversation_context = format_conversation_context(history)
+            result["session_id"] = session_id
+        
         # Obtener prompts personalizados o por defecto
         html_prompt_template, plain_prompt_template = get_prompts_for_category(category)
         
         if format_type in ["html", "both"]:
-            prompt = html_prompt_template.format(context=context, question=question)
-            result["answer"] = llm.invoke(prompt).content
+            # Insertar historial conversacional si existe
+            full_context = f"{conversation_context}\n\nINFORMACIÓN DE DOCUMENTOS:\n{context}" if conversation_context else context
+            prompt = html_prompt_template.format(context=full_context, question=question)
+            answer = llm.invoke(prompt).content
+            result["answer"] = answer
             result["sources"] = f"<ul>{sources_html}</ul>"
+            
+            # Guardar en historial si hay sesión
+            if session_id:
+                add_to_conversation(session_id, "user", question)
+                add_to_conversation(session_id, "assistant", answer)
         
         if format_type in ["plain", "both"]:
-            prompt = plain_prompt_template.format(context=context, question=question)
-            result["answer_plain"] = llm.invoke(prompt).content
+            # Insertar historial conversacional si existe
+            full_context = f"{conversation_context}\n\nINFORMACIÓN DE DOCUMENTOS:\n{context}" if conversation_context else context
+            prompt = plain_prompt_template.format(context=full_context, question=question)
+            answer_plain = llm.invoke(prompt).content
+            result["answer_plain"] = answer_plain
             result["sources_plain"] = sources_plain
+            
+            # Guardar en historial si hay sesión (solo si no se guardó antes en html)
+            if session_id and format_type == "plain":
+                add_to_conversation(session_id, "user", question)
+                add_to_conversation(session_id, "assistant", answer_plain)
         
-        # Guardar en caché
-        cache_answer(cache_key, result)
+        # Guardar en caché solo si no hay sesión
+        if use_cache:
+            cache_key = get_cache_key(question, category, format_type)
+            cache_answer(cache_key, result)
         
         return result
         
@@ -821,6 +889,78 @@ async def clear_cache():
     return {"message": f"Caché limpiado: {cleared} items"}
 
 
+@app.delete("/conversations/{session_id}")
+async def clear_conversation(session_id: str):
+    """Limpia el historial de una conversación específica."""
+    if session_id in conversation_history:
+        del conversation_history[session_id]
+        return {"message": f"Conversación '{session_id}' eliminada exitosamente"}
+    else:
+        raise HTTPException(status_code=404, detail=f"Sesión '{session_id}' no encontrada")
+
+
+@app.delete("/conversations")
+async def clear_all_conversations():
+    """Limpia todas las conversaciones."""
+    cleared = len(conversation_history)
+    conversation_history.clear()
+    return {"message": f"Se eliminaron {cleared} conversaciones"}
+
+
+@app.get("/conversations/{session_id}")
+async def get_conversation(session_id: str):
+    """Obtiene el historial de una conversación."""
+    history = get_conversation_history(session_id)
+    
+    # Obtener información adicional
+    first_message = history[0]["content"] if history else ""
+    last_message = history[-1]["content"] if history else ""
+    
+    return {
+        "session_id": session_id,
+        "message_count": len(history),
+        "first_message": first_message[:100] + "..." if len(first_message) > 100 else first_message,
+        "last_message": last_message[:100] + "..." if len(last_message) > 100 else last_message,
+        "history": history
+    }
+
+
+@app.get("/conversations")
+async def list_conversations():
+    """Lista todas las conversaciones activas con resumen."""
+    conversations = []
+    
+    for session_id, history in conversation_history.items():
+        if not history:
+            continue
+            
+        # Obtener primera y última pregunta del usuario
+        user_messages = [msg for msg in history if msg["role"] == "user"]
+        assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+        
+        first_question = user_messages[0]["content"] if user_messages else ""
+        last_question = user_messages[-1]["content"] if user_messages else ""
+        last_answer = assistant_messages[-1]["content"] if assistant_messages else ""
+        
+        conversations.append({
+            "session_id": session_id,
+            "message_count": len(history),
+            "interaction_count": len(user_messages),
+            "first_question": first_question[:100] + "..." if len(first_question) > 100 else first_question,
+            "last_question": last_question[:100] + "..." if len(last_question) > 100 else last_question,
+            "last_answer": last_answer[:100] + "..." if len(last_answer) > 100 else last_answer,
+            "preview": f"{first_question[:50]}..." if first_question else "Sin mensajes"
+        })
+    
+    # Ordenar por cantidad de mensajes (más recientes primero)
+    conversations.sort(key=lambda x: x["message_count"], reverse=True)
+    
+    return {
+        "total_conversations": len(conversations),
+        "conversations": conversations
+    }
+
+
 @app.get("/categories")
 async def list_categories():
     """Lista categorías disponibles con información detallada."""
@@ -1027,15 +1167,16 @@ async def delete_category(category_name: str):
 async def root():
     """Info de la API."""
     return {
-        "message": "PDF & Video RAG API - 🎛️ GESTIÓN AVANZADA",
-        "version": "4.0 - Category Management System",
-        "philosophy": "Sistema completo de gestión de categorías, archivos y prompts personalizados.",
+        "message": "PDF & Video RAG API - 🎛️ GESTIÓN AVANZADA + 💬 CONVERSACIONAL",
+        "version": "4.1 - Conversational Memory System",
+        "philosophy": "Sistema completo de gestión de categorías, archivos, prompts personalizados y memoria conversacional.",
         "features": [
             "✅ Gestión completa de categorías",
             "✅ Subida/eliminación de archivos por API",
             "✅ Prompts personalizados por categoría",
             "✅ Re-indexación automática",
             "✅ Panel de administración web",
+            "✅ Memoria conversacional (historial de chat)",
             "✅ Caché inteligente",
             "✅ gpt-4o-mini optimizado"
         ],
@@ -1050,16 +1191,20 @@ async def root():
                 "/categories/{name}/prompt": "GET/PUT/DELETE - Gestión prompts"
             },
             "queries": {
-                "/ask": "POST - Consulta PDFs por categoría",
+                "/ask": "POST - Consulta PDFs (con session_id opcional para conversación)",
                 "/ask-video": "POST - Consulta videos por ID",
                 "/videos/{category}": "GET - Lista videos disponibles"
+            },
+            "conversations": {
+                "/conversations/{session_id}": "GET - Obtiene historial, DELETE - Limpia sesión",
+                "/conversations": "DELETE - Limpia todas las conversaciones"
             },
             "system": {
                 "/cache/stats": "GET - Estadísticas del caché",
                 "/cache/clear": "DELETE - Limpia caché de respuestas"
             }
         },
-        "note": "Usa /admin para gestionar el sistema desde el navegador"
+        "note": "Usa /admin para gestionar el sistema. Agrega 'session_id' en /ask para conversaciones con contexto."
     }
 
 
