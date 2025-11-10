@@ -3,7 +3,7 @@ import glob
 import json
 import shutil
 import dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,6 +18,18 @@ import hashlib
 from typing import Dict, List, Optional
 import unicodedata
 from datetime import datetime
+
+# Importar MongoManager
+from mongo_manager import get_mongo_manager, close_mongo_connection
+
+# Importar Clerk Auth
+from clerk_auth import (
+    optional_auth, 
+    require_auth, 
+    get_session_id_from_user,
+    get_user_metadata,
+    ClerkUser
+)
 
 # Cargar variables de entorno
 dotenv.load_dotenv()
@@ -44,10 +56,12 @@ llm = ChatOpenAI(
 
 # Cache global
 vectorstore_cache: Dict[str, Chroma] = {}
-answer_cache: Dict[str, dict] = {}
-conversation_history: Dict[str, List[dict]] = {}  # {session_id: [{role, content}, ...]}
+# answer_cache y conversation_history ahora se gestionan con MongoDB
 PERSIST_DIRECTORY = "chroma_db"
 CATEGORIES_CONFIG_FILE = "categories_config.json"
+
+# Instancia global de MongoDB
+mongo = None
 
 # Modelos de datos
 class QuestionRequest(BaseModel):
@@ -293,33 +307,28 @@ def get_cache_key(question: str, category: str, format_type: str) -> str:
 
 
 def cache_answer(cache_key: str, answer: dict):
-    """Guarda respuesta en caché (máximo 100)."""
-    if len(answer_cache) >= 100:
-        first_key = next(iter(answer_cache))
-        del answer_cache[first_key]
-    answer_cache[cache_key] = answer
+    """Guarda respuesta en caché usando MongoDB."""
+    try:
+        mongo.set_cached_answer(cache_key, answer)
+    except Exception as e:
+        print(f"⚠️ Error al cachear respuesta: {e}")
 
 
 def get_conversation_history(session_id: str) -> List[dict]:
-    """Obtiene el historial de conversación de una sesión."""
-    if session_id not in conversation_history:
-        conversation_history[session_id] = []
-    return conversation_history[session_id]
+    """Obtiene el historial de conversación de una sesión desde MongoDB."""
+    try:
+        return mongo.get_conversation_history(session_id, limit=20)
+    except Exception as e:
+        print(f"⚠️ Error al obtener historial: {e}")
+        return []
 
 
-def add_to_conversation(session_id: str, role: str, content: str):
-    """Agrega un mensaje al historial de conversación."""
-    if session_id not in conversation_history:
-        conversation_history[session_id] = []
-    
-    conversation_history[session_id].append({
-        "role": role,
-        "content": content
-    })
-    
-    # Mantener solo las últimas 10 interacciones (20 mensajes)
-    if len(conversation_history[session_id]) > 20:
-        conversation_history[session_id] = conversation_history[session_id][-20:]
+def add_to_conversation(session_id: str, role: str, content: str, metadata: Optional[dict] = None):
+    """Agrega un mensaje al historial de conversación en MongoDB."""
+    try:
+        mongo.save_conversation_message(session_id, role, content, metadata)
+    except Exception as e:
+        print(f"⚠️ Error al guardar mensaje: {e}")
 
 
 def format_conversation_context(history: List[dict]) -> str:
@@ -472,16 +481,22 @@ def get_or_create_video_vectorstore(video_id: str, category: str = "geomecanica"
 
 
 @app.post("/ask")
-async def ask_question(question_request: QuestionRequest):
+async def ask_question(
+    question_request: QuestionRequest,
+    user: Optional[ClerkUser] = Depends(optional_auth)
+):
     """
     Endpoint simplificado - Deja que la IA evalúe si hay información relevante.
     Sin validaciones complejas, sin filtros de keywords.
     La IA es lo suficientemente inteligente para manejar esto.
+    Con autenticación opcional para historial por usuario.
     """
     question = question_request.question
     category = normalize_category(question_request.category)
     format_type = question_request.format.lower()
-    session_id = question_request.session_id
+    
+    # Usar user_id si está autenticado, sino usar el session_id del request
+    session_id = get_session_id_from_user(user, question_request.session_id)
     
     if format_type not in ["html", "plain", "both"]:
         raise HTTPException(status_code=400, detail="Invalid format")
@@ -491,11 +506,11 @@ async def ask_question(question_request: QuestionRequest):
         use_cache = session_id is None
         
         if use_cache:
-            # Verificar caché solo si no hay sesión
+            # Verificar caché MongoDB solo si no hay sesión
             cache_key = get_cache_key(question, category, format_type)
-            if cache_key in answer_cache:
-                print(f"⚡ Respuesta del caché")
-                return answer_cache[cache_key]
+            cached_answer = mongo.get_cached_answer(cache_key)
+            if cached_answer:
+                return cached_answer
         
         # Obtener vectorstore y buscar documentos relevantes
         vectorstore = get_or_create_vectorstore(category)
@@ -529,6 +544,12 @@ async def ask_question(question_request: QuestionRequest):
             history = get_conversation_history(session_id)
             conversation_context = format_conversation_context(history)
             result["session_id"] = session_id
+            
+            # Agregar info del usuario si está autenticado
+            if user:
+                result["authenticated"] = True
+                result["user_email"] = user.email
+                result["user_id"] = user.user_id
         
         # Obtener prompts personalizados o por defecto
         html_prompt_template, plain_prompt_template = get_prompts_for_category(category)
@@ -543,8 +564,14 @@ async def ask_question(question_request: QuestionRequest):
             
             # Guardar en historial si hay sesión
             if session_id:
-                add_to_conversation(session_id, "user", question)
-                add_to_conversation(session_id, "assistant", answer)
+                metadata = {"category": category, "format": "html"}
+                
+                # Agregar metadata del usuario si está autenticado
+                if user:
+                    metadata.update(get_user_metadata(user))
+                
+                add_to_conversation(session_id, "user", question, metadata)
+                add_to_conversation(session_id, "assistant", answer, metadata)
         
         if format_type in ["plain", "both"]:
             # Insertar historial conversacional si existe
@@ -556,8 +583,14 @@ async def ask_question(question_request: QuestionRequest):
             
             # Guardar en historial si hay sesión (solo si no se guardó antes en html)
             if session_id and format_type == "plain":
-                add_to_conversation(session_id, "user", question)
-                add_to_conversation(session_id, "assistant", answer_plain)
+                metadata = {"category": category, "format": "plain"}
+                
+                # Agregar metadata del usuario si está autenticado
+                if user:
+                    metadata.update(get_user_metadata(user))
+                
+                add_to_conversation(session_id, "user", question, metadata)
+                add_to_conversation(session_id, "assistant", answer_plain, metadata)
         
         # Guardar en caché solo si no hay sesión
         if use_cache:
@@ -688,12 +721,13 @@ async def list_videos(category: str):
 
 @app.get("/cache/stats")
 async def cache_stats():
-    """Estadísticas del caché."""
-    return {
-        "answer_cache_size": len(answer_cache),
-        "answer_cache_max": 100,
-        "vectorstore_cache_size": len(vectorstore_cache)
-    }
+    """Estadísticas del caché desde MongoDB."""
+    try:
+        stats = mongo.get_cache_stats()
+        stats["vectorstore_cache_size"] = len(vectorstore_cache)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener estadísticas: {str(e)}")
 
 
 @app.get("/categories/{category_name}/files")
@@ -759,10 +793,12 @@ async def upload_file(category_name: str, file: UploadFile = File(...)):
         # Re-indexar automáticamente
         await reindex_category_auto(category_name)
         
-        # Limpiar caché de respuestas de esta categoría
-        keys_to_remove = [key for key in answer_cache.keys() if category_name in key]
-        for key in keys_to_remove:
-            del answer_cache[key]
+        # Limpiar caché de respuestas de esta categoría en MongoDB
+        try:
+            deleted = mongo.clear_cache(category=category_name)
+            print(f"🗑️ Caché limpiado para categoría {category_name}: {deleted} entradas")
+        except Exception as e:
+            print(f"⚠️ Error al limpiar caché: {e}")
         
         return {
             "message": f"File '{file.filename}' uploaded successfully to category '{category_name}'",
@@ -809,10 +845,12 @@ async def update_category_prompt(category_name: str, prompt_data: PromptUpdate):
         
         save_categories_config(config)
         
-        # Limpiar caché de respuestas de esta categoría
-        keys_to_remove = [key for key in answer_cache.keys() if category_name in key]
-        for key in keys_to_remove:
-            del answer_cache[key]
+        # Limpiar caché de respuestas de esta categoría en MongoDB
+        try:
+            deleted = mongo.clear_cache(category=category_name)
+            print(f"🗑️ Caché limpiado para categoría {category_name}: {deleted} entradas")
+        except Exception as e:
+            print(f"⚠️ Error al limpiar caché: {e}")
         
         return {
             "message": f"Custom prompts updated for category '{category_name}'",
@@ -868,10 +906,12 @@ async def reset_category_prompt(category_name: str):
             config[category_name]["updated_at"] = datetime.now().isoformat()
             save_categories_config(config)
         
-        # Limpiar caché de respuestas de esta categoría
-        keys_to_remove = [key for key in answer_cache.keys() if category_name in key]
-        for key in keys_to_remove:
-            del answer_cache[key]
+        # Limpiar caché de respuestas de esta categoría en MongoDB
+        try:
+            deleted = mongo.clear_cache(category=category_name)
+            print(f"🗑️ Caché limpiado para categoría {category_name}: {deleted} entradas")
+        except Exception as e:
+            print(f"⚠️ Error al limpiar caché: {e}")
         
         return {
             "message": f"Prompts reset to default for category '{category_name}'"
@@ -883,28 +923,85 @@ async def reset_category_prompt(category_name: str):
 
 @app.delete("/cache/clear")
 async def clear_cache():
-    """Limpia el caché."""
-    cleared = len(answer_cache)
-    answer_cache.clear()
-    return {"message": f"Caché limpiado: {cleared} items"}
+    """Limpia todo el caché de MongoDB."""
+    try:
+        deleted = mongo.clear_cache()
+        return {"message": f"Caché limpiado: {deleted} entradas eliminadas"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al limpiar caché: {str(e)}")
+
+
+@app.delete("/cache/clear/{category}")
+async def clear_cache_by_category(category: str):
+    """Limpia el caché de una categoría específica."""
+    try:
+        category = normalize_category(category)
+        deleted = mongo.clear_cache(category=category)
+        return {"message": f"Caché de categoría '{category}' limpiado: {deleted} entradas eliminadas"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al limpiar caché: {str(e)}")
+
+
+@app.delete("/cache/clear/older-than/{days}")
+async def clear_old_cache(days: int):
+    """Limpia entradas del caché más antiguas que N días."""
+    try:
+        deleted = mongo.clear_cache(older_than_days=days)
+        return {"message": f"Caché antiguo limpiado: {deleted} entradas eliminadas (> {days} días)"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al limpiar caché: {str(e)}")
+
+
+@app.get("/mongodb/health")
+async def mongodb_health():
+    """Verifica el estado de salud de MongoDB."""
+    try:
+        health = mongo.health_check()
+        return health
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@app.get("/mongodb/metrics")
+async def get_mongodb_metrics(hours: int = 24):
+    """Obtiene métricas del sistema de las últimas N horas."""
+    try:
+        metrics = mongo.get_metrics(hours=hours)
+        return {
+            "hours": hours,
+            "total_metrics": len(metrics),
+            "metrics": metrics
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener métricas: {str(e)}")
 
 
 @app.delete("/conversations/{session_id}")
 async def clear_conversation(session_id: str):
-    """Limpia el historial de una conversación específica."""
-    if session_id in conversation_history:
-        del conversation_history[session_id]
-        return {"message": f"Conversación '{session_id}' eliminada exitosamente"}
-    else:
-        raise HTTPException(status_code=404, detail=f"Sesión '{session_id}' no encontrada")
+    """Limpia el historial de una conversación específica en MongoDB."""
+    try:
+        deleted = mongo.clear_conversation(session_id)
+        if deleted:
+            return {"message": f"Conversación '{session_id}' eliminada exitosamente"}
+        else:
+            raise HTTPException(status_code=404, detail=f"Sesión '{session_id}' no encontrada")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al eliminar conversación: {str(e)}")
 
 
 @app.delete("/conversations")
 async def clear_all_conversations():
-    """Limpia todas las conversaciones."""
-    cleared = len(conversation_history)
-    conversation_history.clear()
-    return {"message": f"Se eliminaron {cleared} conversaciones"}
+    """Limpia todas las conversaciones de MongoDB."""
+    try:
+        result = mongo.conversations_collection.delete_many({})
+        return {"message": f"Se eliminaron {result.deleted_count} conversaciones"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al eliminar conversaciones: {str(e)}")
 
 
 @app.get("/conversations/{session_id}")
@@ -927,38 +1024,47 @@ async def get_conversation(session_id: str):
 
 @app.get("/conversations")
 async def list_conversations():
-    """Lista todas las conversaciones activas con resumen."""
-    conversations = []
-    
-    for session_id, history in conversation_history.items():
-        if not history:
-            continue
+    """Lista todas las conversaciones activas con resumen desde MongoDB."""
+    try:
+        # Obtener sesiones activas de las últimas 24 horas
+        active_sessions = mongo.get_active_sessions(hours=24)
+        
+        conversations = []
+        for session_data in active_sessions:
+            session_id = session_data["session_id"]
+            history = mongo.get_conversation_history(session_id, limit=100)
             
-        # Obtener primera y última pregunta del usuario
-        user_messages = [msg for msg in history if msg["role"] == "user"]
-        assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+            if not history:
+                continue
+                
+            # Obtener primera y última pregunta del usuario
+            user_messages = [msg for msg in history if msg["role"] == "user"]
+            assistant_messages = [msg for msg in history if msg["role"] == "assistant"]
+            
+            first_question = user_messages[0]["content"] if user_messages else ""
+            last_question = user_messages[-1]["content"] if user_messages else ""
+            last_answer = assistant_messages[-1]["content"] if assistant_messages else ""
+            
+            conversations.append({
+                "session_id": session_id,
+                "message_count": len(history),
+                "interaction_count": len(user_messages),
+                "first_question": first_question[:100] + "..." if len(first_question) > 100 else first_question,
+                "last_question": last_question[:100] + "..." if len(last_question) > 100 else last_question,
+                "last_answer": last_answer[:100] + "..." if len(last_answer) > 100 else last_answer,
+                "preview": f"{first_question[:50]}..." if first_question else "Sin mensajes",
+                "updated_at": session_data.get("updated_at")
+            })
         
-        first_question = user_messages[0]["content"] if user_messages else ""
-        last_question = user_messages[-1]["content"] if user_messages else ""
-        last_answer = assistant_messages[-1]["content"] if assistant_messages else ""
+        # Ordenar por cantidad de mensajes (más recientes primero)
+        conversations.sort(key=lambda x: x["message_count"], reverse=True)
         
-        conversations.append({
-            "session_id": session_id,
-            "message_count": len(history),
-            "interaction_count": len(user_messages),
-            "first_question": first_question[:100] + "..." if len(first_question) > 100 else first_question,
-            "last_question": last_question[:100] + "..." if len(last_question) > 100 else last_question,
-            "last_answer": last_answer[:100] + "..." if len(last_answer) > 100 else last_answer,
-            "preview": f"{first_question[:50]}..." if first_question else "Sin mensajes"
-        })
-    
-    # Ordenar por cantidad de mensajes (más recientes primero)
-    conversations.sort(key=lambda x: x["message_count"], reverse=True)
-    
-    return {
-        "total_conversations": len(conversations),
-        "conversations": conversations
-    }
+        return {
+            "total_conversations": len(conversations),
+            "conversations": conversations
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar conversaciones: {str(e)}")
 
 
 @app.get("/categories")
@@ -1150,10 +1256,12 @@ async def delete_category(category_name: str):
             del config[category_name]
             save_categories_config(config)
         
-        # Limpiar caché de respuestas relacionadas
-        keys_to_remove = [key for key in answer_cache.keys() if category_name in key]
-        for key in keys_to_remove:
-            del answer_cache[key]
+        # Limpiar caché de respuestas relacionadas en MongoDB
+        try:
+            deleted = mongo.clear_cache(category=category_name)
+            print(f"🗑️ Caché limpiado para categoría {category_name}: {deleted} entradas")
+        except Exception as e:
+            print(f"⚠️ Error al limpiar caché: {e}")
         
         return {
             "message": f"Category '{category_name}' deleted successfully"
@@ -1861,8 +1969,87 @@ async def admin_panel():
     return HTMLResponse(content=html_content)
 
 
+@app.on_event("startup")
+async def startup():
+    """Inicialización al arrancar."""
+    global mongo
+    try:
+        mongo = get_mongo_manager()
+        print("✅ Sistema iniciado con MongoDB")
+    except Exception as e:
+        print(f"❌ Error al inicializar MongoDB: {e}")
+        print("⚠️ El sistema funcionará en modo limitado")
+
+
+@app.get("/my-history")
+async def get_my_history(
+    limit: int = 100,
+    user: ClerkUser = Depends(require_auth)
+):
+    """Obtiene el historial de conversaciones del usuario autenticado."""
+    try:
+        # Usar el user_id como session_id
+        history = mongo.get_conversation_history(user.user_id, limit=limit)
+        
+        return {
+            "user_id": user.user_id,
+            "user_email": user.email,
+            "history": history,
+            "total_messages": len(history)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/my-history")
+async def clear_my_history(
+    user: ClerkUser = Depends(require_auth)
+):
+    """Elimina el historial de conversaciones del usuario autenticado."""
+    try:
+        mongo.clear_conversation(user.user_id)
+        
+        return {
+            "message": "Historial eliminado correctamente",
+            "user_email": user.email
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/my-conversations")
+async def get_my_conversations(
+    user: ClerkUser = Depends(require_auth)
+):
+    """Lista todas las sesiones de conversación del usuario."""
+    try:
+        # Obtener todas las conversaciones del usuario
+        conversations = mongo.conversations_collection.find({
+            "session_id": user.user_id
+        }).sort("updated_at", -1)
+        
+        result = []
+        for conv in conversations:
+            result.append({
+                "session_id": conv["session_id"],
+                "message_count": conv.get("message_count", 0),
+                "created_at": conv["created_at"].isoformat(),
+                "updated_at": conv["updated_at"].isoformat(),
+                "last_message": conv["messages"][-1]["content"][:100] if conv["messages"] else ""
+            })
+        
+        return {
+            "user_email": user.email,
+            "conversations": result,
+            "total": len(result)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.on_event("shutdown")
 def cleanup():
     """Limpieza al cerrar."""
     vectorstore_cache.clear()
-    answer_cache.clear()
+    close_mongo_connection()
+    print("👋 Sistema cerrado correctamente")
