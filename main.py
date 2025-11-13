@@ -1271,6 +1271,16 @@ async def delete_category(category_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "mongodb": "connected" if mongo else "disconnected",
+        "version": "4.1"
+    }
+
+
 @app.get("/")
 async def root():
     """Info de la API."""
@@ -2030,18 +2040,194 @@ async def get_my_conversations(
         
         result = []
         for conv in conversations:
+            # Calcular el message_count manualmente desde el array de messages
+            messages = conv.get("messages", [])
+            message_count = len(messages)
+            
             result.append({
                 "session_id": conv["session_id"],
-                "message_count": conv.get("message_count", 0),
+                "message_count": message_count,
                 "created_at": conv["created_at"].isoformat(),
                 "updated_at": conv["updated_at"].isoformat(),
-                "last_message": conv["messages"][-1]["content"][:100] if conv["messages"] else ""
+                "last_message": messages[-1]["content"][:100] if messages else ""
             })
         
         return {
             "user_email": user.email,
             "conversations": result,
             "total": len(result)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation_detail(
+    conversation_id: str,
+    user: ClerkUser = Depends(require_auth)
+):
+    """Obtiene el detalle completo de una conversación específica."""
+    try:
+        # Buscar la conversación
+        conversation = mongo.conversations_collection.find_one({
+            "_id": conversation_id,
+            "session_id": user.user_id  # Verificar que pertenece al usuario
+        })
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversación no encontrada")
+        
+        messages = conversation.get("messages", [])
+        
+        return {
+            "conversation_id": str(conversation["_id"]),
+            "session_id": conversation["session_id"],
+            "user_email": user.email,
+            "messages": messages,
+            "message_count": len(messages),
+            "created_at": conversation["created_at"].isoformat(),
+            "updated_at": conversation["updated_at"].isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/conversations/{conversation_id}/ask")
+async def ask_in_conversation(
+    conversation_id: str,
+    question_request: QuestionRequest,
+    user: ClerkUser = Depends(require_auth)
+):
+    """
+    Hace una pregunta dentro de una conversación existente.
+    Mantiene todo el contexto de mensajes previos.
+    """
+    try:
+        # Verificar que la conversación existe y pertenece al usuario
+        conversation = mongo.conversations_collection.find_one({
+            "_id": conversation_id,
+            "session_id": user.user_id
+        })
+        
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversación no encontrada")
+        
+        question = question_request.question
+        category = normalize_category(question_request.category)
+        format_type = question_request.format.lower()
+        
+        if format_type not in ["html", "plain", "both"]:
+            raise HTTPException(status_code=400, detail="Invalid format")
+        
+        # Obtener vectorstore y buscar documentos relevantes
+        vectorstore = get_or_create_vectorstore(category)
+        retriever = vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": 2, "fetch_k": 10}
+        )
+        
+        relevant_docs = retriever.invoke(question)
+        context = "\n\n".join([doc.page_content for doc in relevant_docs])
+        
+        # Extraer fuentes
+        sources_info = []
+        for doc in relevant_docs:
+            fuente = doc.metadata.get("source", "Fuente desconocida")
+            pagina = doc.metadata.get("page", "Página no especificada")
+            sources_info.append(f"{fuente} (pág. {pagina})")
+        
+        sources_html = "".join(f"<li>{source}</li>" for source in sources_info)
+        sources_plain = "\n".join(f"• {source}" for source in sources_info)
+        
+        # ⭐ CLAVE: Obtener TODO el historial de la conversación
+        history = mongo.get_conversation_history(user.user_id, limit=100)
+        conversation_context = format_conversation_context(history)
+        
+        result = {
+            "question": question,
+            "category": category,
+            "format": format_type,
+            "conversation_id": conversation_id,
+            "authenticated": True,
+            "user_email": user.email
+        }
+        
+        # Obtener prompts personalizados
+        html_prompt_template, plain_prompt_template = get_prompts_for_category(category)
+        
+        if format_type in ["html", "both"]:
+            # ⭐ CLAVE: Combinar contexto conversacional + documentos
+            full_context = f"{conversation_context}\n\nINFORMACIÓN DE DOCUMENTOS:\n{context}"
+            prompt = html_prompt_template.format(context=full_context, question=question)
+            answer = llm.invoke(prompt).content
+            result["answer"] = answer
+            result["sources"] = f"<ul>{sources_html}</ul>"
+            
+            # Guardar en MongoDB con metadata
+            metadata = {
+                "category": category,
+                "format": "html",
+                "conversation_id": conversation_id,
+                **get_user_metadata(user)
+            }
+            add_to_conversation(user.user_id, "user", question, metadata)
+            add_to_conversation(user.user_id, "assistant", answer, metadata)
+        
+        if format_type in ["plain", "both"]:
+            full_context = f"{conversation_context}\n\nINFORMACIÓN DE DOCUMENTOS:\n{context}"
+            prompt = plain_prompt_template.format(context=full_context, question=question)
+            answer_plain = llm.invoke(prompt).content
+            result["answer_plain"] = answer_plain
+            result["sources_plain"] = sources_plain
+            
+            if format_type == "plain":
+                metadata = {
+                    "category": category,
+                    "format": "plain",
+                    "conversation_id": conversation_id,
+                    **get_user_metadata(user)
+                }
+                add_to_conversation(user.user_id, "user", question, metadata)
+                add_to_conversation(user.user_id, "assistant", answer_plain, metadata)
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/conversations/new")
+async def create_new_conversation(
+    user: ClerkUser = Depends(require_auth)
+):
+    """Crea una nueva conversación vacía para el usuario."""
+    try:
+        from bson import ObjectId
+        from datetime import datetime
+        
+        conversation_id = str(ObjectId())
+        
+        new_conversation = {
+            "_id": conversation_id,
+            "session_id": user.user_id,
+            "messages": [],
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "message_count": 0
+        }
+        
+        mongo.conversations_collection.insert_one(new_conversation)
+        
+        return {
+            "conversation_id": conversation_id,
+            "session_id": user.user_id,
+            "user_email": user.email,
+            "created_at": new_conversation["created_at"].isoformat(),
+            "message": "Nueva conversación creada"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
