@@ -63,6 +63,20 @@ CATEGORIES_CONFIG_FILE = "categories_config.json"
 # Instancia global de MongoDB
 mongo = None
 
+def ensure_mongo():
+    """Verifica que MongoDB esté inicializado."""
+    global mongo
+    if mongo is None:
+        try:
+            mongo = get_mongo_manager()
+            print("⚠️ MongoDB inicializado tardíamente")
+        except Exception as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"MongoDB no disponible: {str(e)}"
+            )
+    return mongo
+
 # Modelos de datos
 class QuestionRequest(BaseModel):
     question: str
@@ -309,7 +323,8 @@ def get_cache_key(question: str, category: str, format_type: str) -> str:
 def cache_answer(cache_key: str, answer: dict):
     """Guarda respuesta en caché usando MongoDB."""
     try:
-        mongo.set_cached_answer(cache_key, answer)
+        db = ensure_mongo()
+        db.set_cached_answer(cache_key, answer)
     except Exception as e:
         print(f"⚠️ Error al cachear respuesta: {e}")
 
@@ -317,7 +332,8 @@ def cache_answer(cache_key: str, answer: dict):
 def get_conversation_history(session_id: str) -> List[dict]:
     """Obtiene el historial de conversación de una sesión desde MongoDB."""
     try:
-        return mongo.get_conversation_history(session_id, limit=20)
+        db = ensure_mongo()
+        return db.get_conversation_history(session_id, limit=20)
     except Exception as e:
         print(f"⚠️ Error al obtener historial: {e}")
         return []
@@ -326,7 +342,9 @@ def get_conversation_history(session_id: str) -> List[dict]:
 def add_to_conversation(session_id: str, role: str, content: str, metadata: Optional[dict] = None):
     """Agrega un mensaje al historial de conversación en MongoDB."""
     try:
-        mongo.save_conversation_message(session_id, role, content, metadata)
+        db = ensure_mongo()
+        db.save_conversation_message(session_id, role, content, metadata)
+        print(f"💾 Guardado: {role} en session {session_id[:20]}... ({len(content)} chars)")
     except Exception as e:
         print(f"⚠️ Error al guardar mensaje: {e}")
 
@@ -336,12 +354,30 @@ def format_conversation_context(history: List[dict]) -> str:
     if not history:
         return ""
     
-    context_lines = ["HISTORIAL DE CONVERSACIÓN PREVIA:"]
-    for msg in history[-6:]:  # Últimas 3 interacciones (6 mensajes)
-        role = "Usuario" if msg["role"] == "user" else "Asistente"
-        context_lines.append(f"{role}: {msg['content']}")
+    context_lines = [
+        "=" * 80,
+        "HISTORIAL DE LA CONVERSACIÓN ACTUAL CON ESTE USUARIO",
+        "=" * 80,
+        "",
+        "⚠️ INSTRUCCIÓN CRÍTICA:",
+        "Este usuario YA te hizo preguntas antes. Lee el historial completo.",
+        "Si pregunta '¿qué me dijiste?', '¿de qué hablamos?', 'explícalo de otra forma',",
+        "debes hacer referencia EXPLÍCITA a lo que dijiste antes.",
+        "NO respondas con saludos genéricos si hay historial previo.",
+        "",
+        "MENSAJES PREVIOS EN ESTA CONVERSACIÓN:",
+        ""
+    ]
     
-    context_lines.append("\n---\n")
+    for msg in history[-6:]:  # Últimas 3 interacciones (6 mensajes)
+        role = "👤 Usuario" if msg["role"] == "user" else "🤖 Tú (Asistente)"
+        context_lines.append(f"{role}: {msg['content']}")
+        context_lines.append("")  # Línea en blanco entre mensajes
+    
+    context_lines.append("=" * 80)
+    context_lines.append("FIN DEL HISTORIAL - Ahora responde la pregunta actual considerando TODO lo anterior")
+    context_lines.append("=" * 80)
+    context_lines.append("")
     return "\n".join(context_lines)
 
 
@@ -502,13 +538,16 @@ async def ask_question(
         raise HTTPException(status_code=400, detail="Invalid format")
 
     try:
+        # Asegurar que MongoDB está disponible
+        db = ensure_mongo()
+        
         # Si hay session_id, NO usar caché (para conversaciones con contexto)
         use_cache = session_id is None
         
         if use_cache:
             # Verificar caché MongoDB solo si no hay sesión
             cache_key = get_cache_key(question, category, format_type)
-            cached_answer = mongo.get_cached_answer(cache_key)
+            cached_answer = db.get_cached_answer(cache_key)
             if cached_answer:
                 return cached_answer
         
@@ -542,7 +581,12 @@ async def ask_question(
         conversation_context = ""
         if session_id:
             history = get_conversation_history(session_id)
+            print(f"🔍 DEBUG: session_id={session_id}, historial tiene {len(history)} mensajes")
+            if history:
+                print(f"🔍 DEBUG: Últimos mensajes: {[m['role'] for m in history[-4:]]}")
             conversation_context = format_conversation_context(history)
+            if conversation_context:
+                print(f"🔍 DEBUG: Contexto formateado ({len(conversation_context)} chars)")
             result["session_id"] = session_id
             
             # Agregar info del usuario si está autenticado
@@ -554,43 +598,46 @@ async def ask_question(
         # Obtener prompts personalizados o por defecto
         html_prompt_template, plain_prompt_template = get_prompts_for_category(category)
         
+        # Variable para guardar la respuesta final (evitar duplicados)
+        final_answer_for_history = None
+        
         if format_type in ["html", "both"]:
             # Insertar historial conversacional si existe
             full_context = f"{conversation_context}\n\nINFORMACIÓN DE DOCUMENTOS:\n{context}" if conversation_context else context
             prompt = html_prompt_template.format(context=full_context, question=question)
+            print(f"🤖 DEBUG HTML: Prompt tiene {len(prompt)} chars, historial incluido: {bool(conversation_context)}")
+            if conversation_context:
+                print(f"📋 MUESTRA DEL CONTEXTO (primeros 500 chars):\n{full_context[:500]}\n")
             answer = llm.invoke(prompt).content
             result["answer"] = answer
             result["sources"] = f"<ul>{sources_html}</ul>"
-            
-            # Guardar en historial si hay sesión
-            if session_id:
-                metadata = {"category": category, "format": "html"}
-                
-                # Agregar metadata del usuario si está autenticado
-                if user:
-                    metadata.update(get_user_metadata(user))
-                
-                add_to_conversation(session_id, "user", question, metadata)
-                add_to_conversation(session_id, "assistant", answer, metadata)
+            final_answer_for_history = answer  # Guardar para historial
         
         if format_type in ["plain", "both"]:
             # Insertar historial conversacional si existe
             full_context = f"{conversation_context}\n\nINFORMACIÓN DE DOCUMENTOS:\n{context}" if conversation_context else context
             prompt = plain_prompt_template.format(context=full_context, question=question)
+            print(f"🤖 DEBUG PLAIN: Prompt tiene {len(prompt)} chars, historial incluido: {bool(conversation_context)}")
+            if conversation_context:
+                print(f"📋 MUESTRA DEL CONTEXTO (primeros 500 chars):\n{full_context[:500]}\n")
             answer_plain = llm.invoke(prompt).content
             result["answer_plain"] = answer_plain
             result["sources_plain"] = sources_plain
             
-            # Guardar en historial si hay sesión (solo si no se guardó antes en html)
-            if session_id and format_type == "plain":
-                metadata = {"category": category, "format": "plain"}
-                
-                # Agregar metadata del usuario si está autenticado
-                if user:
-                    metadata.update(get_user_metadata(user))
-                
-                add_to_conversation(session_id, "user", question, metadata)
-                add_to_conversation(session_id, "assistant", answer_plain, metadata)
+            # Si no hay HTML, usar plain para el historial
+            if format_type == "plain":
+                final_answer_for_history = answer_plain
+        
+        # Guardar en historial UNA SOLA VEZ al final
+        if session_id and final_answer_for_history:
+            metadata = {"category": category, "format": format_type}
+            
+            # Agregar metadata del usuario si está autenticado
+            if user:
+                metadata.update(get_user_metadata(user))
+            
+            add_to_conversation(session_id, "user", question, metadata)
+            add_to_conversation(session_id, "assistant", final_answer_for_history, metadata)
         
         # Guardar en caché solo si no hay sesión
         if use_cache:
@@ -1986,9 +2033,14 @@ async def startup():
     try:
         mongo = get_mongo_manager()
         print("✅ Sistema iniciado con MongoDB")
+        print(f"✅ MongoDB conectado: {mongo is not None}")
     except Exception as e:
         print(f"❌ Error al inicializar MongoDB: {e}")
         print("⚠️ El sistema funcionará en modo limitado")
+        # Intentar reinicializar
+        import traceback
+        traceback.print_exc()
+        raise  # Re-lanzar para que sea visible
 
 
 @app.get("/my-history")
