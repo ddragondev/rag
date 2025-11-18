@@ -5,8 +5,26 @@
 ### Desarrollo (FastAPI directo):
 
 - **Límite configurado:** 100 MB
-- **Validación:** El servidor rechaza archivos mayores con error 413
-- **Mensaje:** "File too large (X MB). Maximum allowed: 100 MB"
+- **Middleware:** `LimitUploadSizeMiddleware` valida el header `content-length`
+- **Validación adicional:** El endpoint verifica el tamaño después de leer el archivo
+- **Error 413:** Se rechaza ANTES de procesar si excede el límite
+- **Mensaje:** "Request too large (X MB). Maximum allowed: 100 MB"
+
+---
+
+## 🚨 Solución Error 413 en Local
+
+Si obtienes error **413 Content Too Large** en desarrollo local:
+
+### ✅ Ya está solucionado con el middleware
+
+El código ahora incluye `LimitUploadSizeMiddleware` que:
+1. Intercepta requests a `/upload`
+2. Lee el header `content-length`
+3. Rechaza archivos grandes ANTES de procesarlos
+4. Retorna error 413 con mensaje claro
+
+**No necesitas configurar nada adicional en local.**
 
 ---
 

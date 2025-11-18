@@ -12,4 +12,5 @@ source venv/bin/activate
 uvicorn main:app --reload --host 0.0.0.0 --port 8000 &
 
 echo "✅ Servidor reiniciado en http://0.0.0.0:8000"
+echo "📋 Límite de upload: 100 MB"
 echo "📋 Logs disponibles con: tail -f nohup.out"

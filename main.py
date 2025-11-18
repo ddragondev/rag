@@ -37,6 +37,34 @@ dotenv.load_dotenv()
 # Inicializar FastAPI
 app = FastAPI()
 
+# Configuración de límites de subida de archivos
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+MAX_FILE_SIZE_MB = MAX_FILE_SIZE / (1024 * 1024)
+
+# Configurar límite de tamaño del body en Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+class LimitUploadSizeMiddleware(BaseHTTPMiddleware):
+    """Middleware para limitar el tamaño de uploads."""
+    async def dispatch(self, request: Request, call_next):
+        # Solo aplicar a endpoints de upload
+        if "/upload" in request.url.path:
+            if request.headers.get("content-length"):
+                content_length = int(request.headers["content-length"])
+                if content_length > MAX_FILE_SIZE:
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "detail": f"Request too large ({content_length / 1024 / 1024:.2f} MB). Maximum allowed: {MAX_FILE_SIZE_MB:.0f} MB"
+                        }
+                    )
+        return await call_next(request)
+
+# Agregar middleware ANTES de CORS
+app.add_middleware(LimitUploadSizeMiddleware)
+
 # Configurar CORS - DESARROLLO (permite todos los orígenes)
 app.add_middleware(
     CORSMiddleware,
@@ -45,10 +73,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configuración de límites de subida de archivos
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
-MAX_FILE_SIZE_MB = MAX_FILE_SIZE / (1024 * 1024)
 
 # Configurar el modelo optimizado
 llm = ChatOpenAI(
