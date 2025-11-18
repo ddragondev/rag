@@ -46,6 +46,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Configuración de límites de subida de archivos
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB
+MAX_FILE_SIZE_MB = MAX_FILE_SIZE / (1024 * 1024)
+
 # Configurar el modelo optimizado
 llm = ChatOpenAI(
     model="gpt-4o-mini",
@@ -813,13 +817,25 @@ async def list_category_files(category_name: str):
 
 @app.post("/categories/{category_name}/upload")
 async def upload_file(category_name: str, file: UploadFile = File(...)):
-    """Sube un archivo PDF a una categoría."""
+    """Sube un archivo PDF a una categoría (máx 100 MB)."""
     try:
         category_name = normalize_category(category_name)
         
         # Verificar que es PDF
         if not file.filename.endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+        
+        # Leer contenido del archivo
+        content = await file.read()
+        
+        # Validar tamaño del archivo
+        file_size = len(content)
+        if file_size > MAX_FILE_SIZE:
+            file_size_mb = file_size / (1024 * 1024)
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large ({file_size_mb:.2f} MB). Maximum allowed: {MAX_FILE_SIZE_MB:.0f} MB"
+            )
         
         # Crear directorio si no existe
         docs_path = f"docs/{category_name}"
@@ -834,7 +850,6 @@ async def upload_file(category_name: str, file: UploadFile = File(...)):
         
         # Escribir archivo
         with open(file_path, "wb") as buffer:
-            content = await file.read()
             buffer.write(content)
         
         # Re-indexar automáticamente
@@ -847,11 +862,17 @@ async def upload_file(category_name: str, file: UploadFile = File(...)):
         except Exception as e:
             print(f"⚠️ Error al limpiar caché: {e}")
         
+        # Calcular tamaño en MB para el mensaje
+        file_size_mb = file_size / (1024 * 1024)
+        print(f"✅ Archivo subido: {file.filename} ({file_size_mb:.2f} MB)")
+        
         return {
             "message": f"File '{file.filename}' uploaded successfully to category '{category_name}'",
             "filename": file.filename,
-            "size": len(content),
-            "category": category_name
+            "size": file_size,
+            "size_mb": round(file_size_mb, 2),
+            "category": category_name,
+            "max_size_mb": int(MAX_FILE_SIZE_MB)
         }
         
     except HTTPException:
@@ -1351,7 +1372,7 @@ async def root():
                 "/categories": "GET - Lista categorías, POST - Crear categoría",
                 "/categories/{name}": "GET - Info, PUT - Actualizar, DELETE - Eliminar",
                 "/categories/{name}/files": "GET - Lista archivos",
-                "/categories/{name}/upload": "POST - Subir archivo PDF",
+                "/categories/{name}/upload": "POST - Subir archivo PDF (máx 100 MB)",
                 "/categories/{name}/files/{filename}": "DELETE - Eliminar archivo",
                 "/categories/{name}/prompt": "GET/PUT/DELETE - Gestión prompts"
             },
